@@ -1168,15 +1168,15 @@ export function WallpaperPlayer({
   }, []);
 
   // Viewer: a pointer click on a photo (anywhere but the controls) starts or
-  // stops the slideshow, like OK. Not while zoomed, where a drag pans.
+  // stops the slideshow, like OK, and like OK leaves the controls as they are.
+  // Not while zoomed, where a drag pans.
   const onPhotoClick = useCallback(
     (e: MouseEvent) => {
       if ((e.target as HTMLElement).closest('.wp-player-ui, .wp-edge-progress')) return;
       if (assets[iRef.current]?.isVideo || zoomRef.current > 1) return;
       setPlaying(pausedRef.current);
-      poke();
     },
-    [assets, setPlaying, poke],
+    [assets, setPlaying],
   );
 
   const exit = useCallback(() => {
@@ -1465,9 +1465,13 @@ export function WallpaperPlayer({
       const seekable = !!vid && !cache.current.get(iRef.current)?.error;
       const g = groupRef.current;
       const shown = overlayRef.current; // as before this key's poke() below
-      // Stepping to the previous/next item leaves the controls as they are
-      // (hidden ones stay hidden); every other key brings them up.
-      if (!(g === 'nav' && zoomRef.current <= 1 && (dir === 'left' || dir === 'right'))) poke();
+      // Stepping to the previous/next item, or starting/stopping the show on a
+      // photo, leaves the controls as they are (hidden ones stay hidden);
+      // every other key brings them up.
+      const step = dir === 'left' || dir === 'right';
+      const showKey =
+        !vid && (code === Key.Enter || code === Key.PlayPause || code === Key.Play || code === Key.Pause);
+      if (!(g === 'nav' && zoomRef.current <= 1 && (step || showKey))) poke();
 
       // Back drops a picked group back to previous/next first, then closes
       if (isBack(code)) {
