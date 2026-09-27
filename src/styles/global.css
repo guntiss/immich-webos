@@ -1957,13 +1957,15 @@ select {
 }
 /* the viewer's slideshow: a photo's dwell filling the line (scaled, not
    resized, so it animates on the compositor). Thinner than a video's line,
-   and the same with the controls up or hidden. The TV panel crops about 2px
-   off the bottom edge, so this shows as a ~2px line (at 2.5px it vanished). */
+   and the same with the controls up or hidden. Held a little off the bottom
+   edge: the TV crops a few px there, 2-3 and drifting (OLED Screen Shift),
+   which hid a line on the edge now and then. */
 .wp-edge-progress.dwell {
   pointer-events: none;
 }
 .wp-player .wp-edge-progress.dwell .wp-edge-track {
-  height: 4px;
+  bottom: 5px;
+  height: 2px;
 }
 .wp-edge-progress.dwell .wp-edge-fill {
   right: 0;
