@@ -53,10 +53,11 @@ interface Props {
 }
 
 // The d-pad drives one group of controls at a time, stepped through with
-// Up/Down from the bottom: 'nav' (Left/Right = previous/next item, always the
-// default so the arrows never change meaning on their own), 'seek' (Left/Right
-// jump the clip on screen, viewer videos only) and 'bar' (Left/Right walk the
-// options bar). The selected group's controls are ringed on screen.
+// Down/Up in the order they sit on screen, top to bottom: 'nav' (Left/Right =
+// previous/next item, the side arrows; always the default so the arrows never
+// change meaning on their own), 'seek' (Left/Right jump the clip, the video
+// transport above the bar; viewer videos only) and 'bar' (Left/Right walk the
+// options bar along the bottom edge). The selected group's controls are ringed.
 type Group = 'nav' | 'seek' | 'bar';
 
 const HIDE_MS = 3000;
@@ -196,7 +197,7 @@ export function WallpaperPlayer({
   // The viewer opens paused: it's for browsing, and Slideshow turns it into a show.
   const [paused, setPaused] = useState(viewer);
   // Viewer with "hide player overlay" set in the grid header: the chrome never
-  // shows on its own. Read once at open; Up still brings up the controls.
+  // shows on its own. Read once at open; Down still brings up the controls.
   const overlayHidden = useRef(viewer && getOverlayHidden()).current;
   const [overlay, setOverlay] = useState(!overlayHidden);
   // which controls the d-pad drives (see Group). Back or idling drops to 'nav'.
@@ -1448,8 +1449,8 @@ export function WallpaperPlayer({
         return;
       }
 
-      // options bar: Left/Right walk its buttons, OK presses one, Down steps
-      // back down. The media keys still reach the clip/show below.
+      // options bar: Left/Right walk its buttons, OK presses one, Up steps
+      // back up. The media keys still reach the clip/show below.
       if (g === 'bar') {
         if (dir === 'left' || dir === 'right') {
           e.preventDefault();
@@ -1458,11 +1459,11 @@ export function WallpaperPlayer({
         }
         if (dir === 'up') {
           e.preventDefault();
+          selectGroup(seekable ? 'seek' : 'nav');
           return;
         }
         if (dir === 'down') {
           e.preventDefault();
-          selectGroup(seekable ? 'seek' : 'nav');
           return;
         }
         if (code === Key.Enter) {
@@ -1492,13 +1493,14 @@ export function WallpaperPlayer({
         }
       }
 
-      // Up/Down step through the groups: nav, seek (videos only), bar
-      if (dir === 'up') {
+      // Down/Up step through the groups as they sit on screen: nav (the side
+      // arrows), seek (the transport, videos only), bar (the bottom edge)
+      if (dir === 'down') {
         e.preventDefault();
         selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
         return;
       }
-      if (dir === 'down') {
+      if (dir === 'up') {
         e.preventDefault();
         if (g === 'seek') selectGroup('nav');
         return;
