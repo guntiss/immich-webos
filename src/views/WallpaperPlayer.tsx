@@ -1404,10 +1404,15 @@ export function WallpaperPlayer({
     if (!v) return;
     const update = () => readProgress(v);
     const onPlay = () => setVidPaused(false);
-    // paused (by the user, or at the end): bring the transport up
+    // paused (by the user, or at the end): bring the transport up. Not for a
+    // clip left behind (the event lands once the next item is current), nor
+    // while the show runs: a clip pausing then is one ending into the next
+    // item (the TV rewinds it first, so `ended` can't tell; pausing one by
+    // hand stops the show first). Moving on leaves the controls as they are.
     const onPause = () => {
       setVidPaused(true);
       update();
+      if (cache.current.get(iRef.current)?.el !== v || !pausedRef.current) return;
       poke();
     };
     const evs = ['timeupdate', 'progress', 'durationchange', 'loadedmetadata', 'seeked'];
