@@ -1935,7 +1935,10 @@ select {
 .wp-edge-buffer {
   background: rgba(255, 255, 255, 0.45);
 }
+/* a clip's fill spans the track and slides in from the left (moved, not
+   resized, so it glides on the compositor, see glide), the knob at its end */
 .wp-edge-fill {
+  right: 0;
   background: var(--immich-dark-primary);
 }
 /* play-head knob, sitting on the screen edge */
@@ -1968,7 +1971,6 @@ select {
   height: 2px;
 }
 .wp-edge-progress.dwell .wp-edge-fill {
-  right: 0;
   transform-origin: 0 0;
   animation: wp-dwell linear both;
 }

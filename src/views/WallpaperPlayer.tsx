@@ -94,6 +94,8 @@ const HOLD_MS = 400; // Left/Right down this long on a video seeks it instead of
 const HOLD_SEEK_MS = 250; // held: one seek step this often, at most (each waits for the last)
 const HOLD_SEEK_STEPS = 20; // held: steps to cross a whole clip (5s at best), each at least 1s
 const HOLD_END_GAP = 0.1; // held off a clip's end: it waits this far short of it (s)
+const GLIDE_SLACK_MS = 500; // the seek line may run this far ahead of a clip's (stale) time
+const GLIDE_CATCHUP_MS = 300; // ...or this far behind it, catching up rather than jumping
 const ZOOM_STEP = 1.2; // scale multiplier per scroll-wheel tick
 const MAX_ZOOM = 6;
 const PAN_KEY_STEP = 120; // px the d-pad nudges a zoomed photo
@@ -314,6 +316,10 @@ export function WallpaperPlayer({
   const [vidPaused, setVidPaused] = useState(false);
   const [progress, setProgress] = useState({ cur: 0, dur: 0, buffered: 0 });
   const seekRef = useRef<HTMLDivElement>(null);
+  // the seek line's fill and its run across the clip (see glide)
+  const fillRef = useRef<HTMLDivElement>(null);
+  // (on: running; t: the clip's time at the last look, in ms)
+  const fillRun = useRef<{ el: HTMLElement; ms: number; anim: Animation; on: boolean; t: number } | null>(null);
   const draggingRef = useRef(false);
   // Left/Right down on a video with 'nav' picked: a tap steps to the previous/
   // next item on its release, a hold (HOLD_MS) seeks the clip until let go.
@@ -1016,6 +1022,8 @@ export function WallpaperPlayer({
     vidHoldRef.current = false;
     setVidPaused(false);
     setProgress({ cur: 0, dur: 0, buffered: 0 });
+    fillRun.current?.anim.cancel();
+    fillRun.current = null;
 
     loadInto(i)
       .then((e) => {
@@ -1380,6 +1388,46 @@ export function WallpaperPlayer({
   const liveId = viewer && visible && !visible.asset.isVideo ? visible.asset.livePhotoVideoId ?? null : null;
 
   // Video transport: follow the clip on screen.
+  // The seek line glides like the slideshow's dwell line rather than stepping:
+  // the TV moves a clip's currentTime only every ~200ms and fires timeupdate
+  // at uneven 150-330ms, so the fill runs one linear animation across the
+  // whole clip on the compositor. It's held while the clip isn't moving and
+  // put back on the clip's time when it strays: further ahead than the clip's
+  // stale time can explain, or behind a time the clip has reached (a little
+  // behind, it runs a touch faster until it catches up: no jump). It starts
+  // only once the clip's time has moved: the TV calls a clip playing well
+  // before its time starts (~0.6s for a fresh one, with no event then).
+  const glide = useCallback((v: HTMLVideoElement) => {
+    const el = fillRef.current;
+    const ms = v.duration * 1000;
+    if (!el || !(ms > 0) || ms === Infinity) return;
+    const t = v.currentTime * 1000;
+    let run = fillRun.current;
+    if (!run || run.el !== el || run.ms !== ms) {
+      run?.anim.cancel();
+      const anim = el.animate([{ transform: 'translateX(-100%)' }, { transform: 'translateX(0)' }], {
+        duration: ms,
+        fill: 'both',
+      });
+      anim.pause();
+      run = fillRun.current = { el, ms, anim, on: false, t };
+    }
+    const { anim } = run;
+    const behind = t - ((anim.currentTime as number | null) ?? 0);
+    const jump = v.seeking || behind > GLIDE_CATCHUP_MS || -behind > GLIDE_SLACK_MS;
+    if (jump) anim.currentTime = t;
+    const rate = !jump && behind > 0 ? 1 + behind / 500 : 1; // caught up in ~0.5s
+    if (anim.playbackRate !== rate) anim.playbackRate = rate;
+    const moving = !v.paused && !v.seeking && v.readyState > 2 && t < ms && (run.on || t !== run.t);
+    run.t = t;
+    if (!moving && run.on) {
+      anim.pause();
+      run.on = false;
+    } else if (moving && !run.on && ((anim.currentTime as number | null) ?? 0) < ms) {
+      anim.play(); // (not at its end: play() there would start it over)
+      run.on = true;
+    }
+  }, []);
   const readProgress = useCallback((v: HTMLVideoElement) => {
     let buffered = 0;
     try {
@@ -1393,7 +1441,8 @@ export function WallpaperPlayer({
       /* buffered not readable yet */
     }
     setProgress({ cur: v.currentTime, dur: v.duration || 0, buffered });
-  }, []);
+    glide(v);
+  }, [glide]);
   const updateProgress = useCallback(() => {
     const v = cache.current.get(iRef.current)?.el;
     if (v) readProgress(v);
@@ -1415,7 +1464,7 @@ export function WallpaperPlayer({
       if (cache.current.get(iRef.current)?.el !== v || !pausedRef.current) return;
       poke();
     };
-    const evs = ['timeupdate', 'progress', 'durationchange', 'loadedmetadata', 'seeked'];
+    const evs = ['timeupdate', 'progress', 'durationchange', 'loadedmetadata', 'seeking', 'seeked', 'playing', 'waiting'];
     evs.forEach((n) => v.addEventListener(n, update));
     v.addEventListener('play', onPlay);
     v.addEventListener('pause', onPause);
@@ -2180,7 +2229,7 @@ export function WallpaperPlayer({
         >
           <div class="wp-edge-track">
             <div class="wp-edge-buffer" style={{ width: `${bufferedPct}%` }} />
-            <div class="wp-edge-fill" style={{ width: `${pct}%` }}>
+            <div class="wp-edge-fill" ref={fillRef} style={{ transform: `translateX(${pct - 100}%)` }}>
               <span class="wp-edge-knob" />
             </div>
           </div>
