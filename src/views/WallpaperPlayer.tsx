@@ -72,11 +72,12 @@ const CAPTION_BROWSE_MS = 250; // ...or this long while paused and stepping by h
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
 const SPEEDS = [
+  { label: '3s', ms: 3000 },
   { label: '5s', ms: 5000 },
   { label: '10s', ms: 10000 },
   { label: '15s', ms: 15000 },
 ];
-const DEFAULT_MS = SPEEDS[0].ms; // dwell per still (5s)
+const DEFAULT_MS = SPEEDS[0].ms; // dwell per still (3s)
 const WINDOW = 2; // stills prefetched ahead (each holds a decoded bitmap in TV RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
 const SEEK_STEP = 10; // seconds
