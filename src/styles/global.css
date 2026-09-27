@@ -1422,10 +1422,6 @@ select {
 .wp-transport > * + * {
   margin-left: 16px;
 }
-/* holds a button's place, unseen and unclickable */
-.fs-btn.ghost {
-  visibility: hidden;
-}
 .fs-time {
   font-size: 20px;
   color: #fff;

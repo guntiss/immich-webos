@@ -1838,13 +1838,9 @@ export function WallpaperPlayer({
           </div>
         )}
 
-        {/* photo transport: the slideshow's play/pause right where a clip's
-            is (an invisible back-10s button holds its place), + photo number */}
+        {/* photo transport: the slideshow's play/pause, + photo number */}
         {photoPlace && (
           <div class="wp-transport">
-            <span class="fs-btn round ghost" aria-hidden="true">
-              <Icon name="rewind10" size={30} />
-            </span>
             <button
               class="fs-btn round"
               onClick={() => { setPlaying(pausedRef.current); poke(); }}
