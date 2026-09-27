@@ -402,8 +402,9 @@ export function WallpaperPlayer({
   // so each clip ducks it before playing and hands it back once it ends or is
   // left. Not when it's paused: the music coming back would take the TV's one
   // player away from the clip and blank its frame. The viewer ducks it even
-  // before LOADING a clip (loadDuck): loading one, an original especially, can
-  // already cut the music off mid-song.
+  // before LOADING the clip it's moving onto (loadDuck): loading one, an
+  // original especially, can already cut the music off mid-song. Clips readied
+  // ahead as neighbours don't: they load metadata only, which leaves it playing.
   const musicDucks = useRef(new Map<HTMLVideoElement, ReturnType<typeof duckMusic>>());
   const unduck = useCallback((el: HTMLVideoElement) => {
     musicDucks.current.get(el)?.release();
@@ -643,15 +644,16 @@ export function WallpaperPlayer({
   // Load one item. Stills: see loadBitmapStill; on older sets, fetch the
   // original as a pre-decoded <img> (HEIC/RAW, or an original the TV won't
   // pre-decode, fall back to the preview JPEG). Videos: a hidden <video> that
-  // buffers in chunks; ready on its first decoded frame (loadeddata). Caching
-  // + dedup live in loadInto below.
+  // buffers in chunks; ready on its first decoded frame (loadeddata). `ahead`:
+  // a prefetch, not the item being moved onto. Caching + dedup live in loadInto
+  // below.
   const loadFresh = useCallback(
-    async (idx: number): Promise<Cached | null> => {
+    async (idx: number, ahead: boolean): Promise<Cached | null> => {
       const a = assets[idx];
       if (!a) return null;
 
       if (a.isVideo) {
-        if (viewer) await duckForLoad(idx);
+        if (viewer && !ahead) await duckForLoad(idx);
         const el = document.createElement('video');
         // the viewer streams the quality last picked; its clips play with their
         // own sound; the slideshow keeps them muted
@@ -775,13 +777,13 @@ export function WallpaperPlayer({
   const inflight = useRef<Map<number, Promise<Cached | null>>>(new Map());
   const cacheGen = useRef(0);
   const loadInto = useCallback(
-    (idx: number): Promise<Cached | null> => {
+    (idx: number, ahead = false): Promise<Cached | null> => {
       const hit = cache.current.get(idx);
       if (hit) return Promise.resolve(hit);
       let p = inflight.current.get(idx);
       if (!p) {
         const gen = cacheGen.current;
-        p = loadFresh(idx).then(
+        p = loadFresh(idx, ahead).then(
           (e) => {
             if (cacheGen.current !== gen) {
               if (e) teardown(e); // the order was rebuilt meanwhile: idx means another asset now
@@ -1076,8 +1078,10 @@ export function WallpaperPlayer({
     // bandwidth and decoder, so the one needed next landed last. The slideshow
     // fills the window ahead (all stills, but only the NEXT video — videos are
     // heavy to buffer). The viewer is stepped both ways, so it readies the one
-    // behind too, and loads a video only once it's the one shown. Stops when
-    // the show moves on; the next run resumes from cache.
+    // behind too, and of its clips only the two one press away. A clip readied
+    // ahead loads metadata only, which on webOS already decodes its first
+    // frame (and leaves the music playing). Stops when the show moves on; the
+    // next run resumes from cache.
     async function prefetch() {
       const ks: number[] = [];
       if (viewer) ks.push(i + 1, i - 1, i + 2);
@@ -1089,10 +1093,10 @@ export function WallpaperPlayer({
         if (!a) continue;
         prefetchGeoFor(a);
         if (a.isVideo) {
-          if (viewer || vids >= 1) continue;
+          if (viewer ? k === i + 2 : vids >= 1) continue;
           vids++;
         }
-        await loadInto(k);
+        await loadInto(k, true);
       }
     }
     evict(i);
@@ -1540,6 +1544,13 @@ export function WallpaperPlayer({
     const next: VideoQuality = e.q === 'original' ? 'transcoded' : 'original';
     setVideoQuality(next); // remember for later videos + app restarts
     switchSrc(e, a.id, next);
+    // clips readied around it hold the other stream: load them afresh
+    for (const [k, c] of cache.current) {
+      if (k !== iRef.current && c.el && c.q !== next) {
+        teardown(c);
+        cache.current.delete(k);
+      }
+    }
     poke();
   }, [assets, switchSrc, poke]);
 
