@@ -1802,6 +1802,24 @@ select {
   height: 100%;
   object-fit: cover;
 }
+/* a viewer video's box: its blurred thumbnail fills the screen, the clip is
+   sized inline to its picture (see videoBox in WallpaperPlayer) */
+.wp-vid {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: #000;
+}
+.wp-vid > video {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
 /* Live Photo motion clip, under the current crossfade layer (whose still fades
    out to reveal it). Carries the still's blurred fill as its own background; the
    <video> is sized inline to the photo's on-screen rect. */

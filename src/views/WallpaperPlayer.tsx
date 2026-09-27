@@ -164,6 +164,7 @@ interface Cached {
   error?: boolean; // failed to load — advance past it
   gone?: boolean; // torn down: its element's late events are ignored
   el?: HTMLVideoElement; // for video: the buffering, reusable element
+  wrap?: HTMLDivElement; // for viewer video: the screen-filling box it's shown in (see videoBox)
   q?: VideoQuality; // for video: which stream it's playing
   settled?: Promise<void>; // for video: resolves once ready (or failed for good)
   img?: Still; // for still: the fully-decoded, reusable <img>/canvas element
@@ -177,6 +178,7 @@ interface Frame {
   asset: Asset;
   src: string;
   el?: HTMLVideoElement;
+  wrap?: HTMLDivElement; // what's mounted for a viewer video (holds `el`)
   img?: Still;
 }
 
@@ -642,6 +644,7 @@ export function WallpaperPlayer({
           ready: false,
           decoded: false,
           el,
+          wrap: viewer ? videoBox(el, a.id) : undefined,
           q,
           settled: new Promise<void>((res) => (settle = res)),
         };
@@ -783,6 +786,7 @@ export function WallpaperPlayer({
       e.el.load();
       e.el.remove();
     }
+    e.wrap?.remove();
     if (e.img) freeStill(e.img);
     if (e.base) freeStill(e.base.img);
   };
@@ -1012,7 +1016,7 @@ export function WallpaperPlayer({
           // element-steal bug, fixed properly in showFrame/the show effect.
           if (wantPlay()) playEl(el); // takes over the load's duck
           releaseLoadDuck();
-          showFrame({ key, asset, src: e.src, el });
+          showFrame({ key, asset, src: e.src, el, wrap: e.wrap });
         };
         if (e.decoded) reveal();
         else {
@@ -1902,7 +1906,7 @@ export function WallpaperPlayer({
   // the visible layer's video plays; the outgoing one freezes as it fades.
   const mountLayer = (node: HTMLDivElement | null, f: Frame | null, on: boolean) => {
     if (!node || closingRef.current) return; // closing: the still is the hero's
-    const want = (f && (f.el || f.img)) || null;
+    const want = (f && (f.wrap || f.el || f.img)) || null;
     if (node.firstChild !== want) {
       while (node.firstChild) node.removeChild(node.firstChild); // detach prior element (still cached)
       if (want) node.appendChild(want);
@@ -2248,7 +2252,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 // A CPU canvas (willReadFrequently) keeps the readback off the GPU entirely.
 const BACKDROP_W = 192; // backdrop canvas width; height follows the screen aspect
 const BACKDROP_BLUR = 6; // px at canvas scale (~60px at 1080p)
-async function applyBlurBackdrop(img: Still, id: string): Promise<void> {
+async function applyBlurBackdrop(img: HTMLElement, id: string): Promise<void> {
   try {
     const thumb = await loadImage(await loadThumb(id));
     const sw = window.innerWidth || 1920;
@@ -2284,6 +2288,31 @@ async function applyBlurBackdrop(img: Still, id: string): Promise<void> {
   } catch {
     /* no backdrop — plain black bars */
   }
+}
+
+// A viewer video's screen-filling box: the video's blurred thumbnail fills it
+// (the photos' blurred sides, see applyBlurBackdrop), with the clip sized to
+// its picture in the middle. Not a background on the <video> itself: webOS
+// plays it on its own hardware plane, punched through its whole element box,
+// so the element only covers the picture (as the Live Photo clip does).
+function videoBox(el: HTMLVideoElement, id: string): HTMLDivElement {
+  const box = document.createElement('div');
+  box.className = 'wp-vid';
+  box.appendChild(el);
+  void applyBlurBackdrop(box, id);
+  const fit = () => {
+    if (!el.videoWidth || !el.videoHeight) return;
+    const b = fitBox(el.videoWidth / el.videoHeight);
+    el.style.left = `${b.left}px`;
+    el.style.top = `${b.top}px`;
+    el.style.width = `${b.width}px`;
+    el.style.height = `${b.height}px`;
+  };
+  el.addEventListener('loadedmetadata', fit); // again on a quality switch
+  // and when its size changes: the TV can report a rotated (portrait) clip
+  // unrotated at first, then correct it
+  el.addEventListener('resize', fit);
+  return box;
 }
 
 // the blurred fill a still carries (see applyBlurBackdrop), for an element
