@@ -1172,6 +1172,18 @@ export function WallpaperPlayer({
     setPaused(!on);
   }, []);
 
+  // Viewer: a pointer click on a photo (anywhere but the controls) starts or
+  // stops the slideshow, like OK. Not while zoomed, where a drag pans.
+  const onPhotoClick = useCallback(
+    (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('.wp-player-ui, .wp-edge-progress')) return;
+      if (assets[iRef.current]?.isVideo || zoomRef.current > 1) return;
+      setPlaying(pausedRef.current);
+      poke();
+    },
+    [assets, setPlaying, poke],
+  );
+
   const exit = useCallback(() => {
     onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
   }, [onExit, assets]);
@@ -1681,6 +1693,7 @@ export function WallpaperPlayer({
     <div
       class={'wp-player group-' + group + (overlay ? ' show-ui' : '')}
       onMouseMove={poke}
+      onClick={viewer ? onPhotoClick : undefined}
       onWheel={viewer ? onWheel : undefined}
       onPointerDown={viewer ? onImgDown : undefined}
       onPointerMove={viewer ? onImgMove : undefined}
