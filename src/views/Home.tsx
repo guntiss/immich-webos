@@ -25,8 +25,9 @@ import { Sidebar, Route } from '../components/Sidebar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Albums, AlbumsRestore } from './Albums';
 import { Search } from './Search';
-import { Fullscreen } from './Fullscreen';
+import { WallpaperPlayer } from './WallpaperPlayer';
 import { Wallpaper } from './Wallpaper';
+import { memorySeen, SeenStore } from './wallpaperSeen';
 import { useRemote } from '../nav/useRemote';
 import { setRoot, focusables, focus, elementInViewport, focusVisibleContent } from '../nav/focus';
 import { exitApp } from '../nav/exit';
@@ -34,6 +35,7 @@ import { exitApp } from '../nav/exit';
 interface Viewer {
   assets: Asset[];
   index: number;
+  seen: SeenStore; // what its slideshow has shown, for shuffle
 }
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
@@ -60,8 +62,6 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const loadNextRef = useRef<(() => void) | null>(null);
   // Albums-list scroll + focus to restore when returning from an opened album.
   const albumsRestore = useRef<AlbumsRestore | null>(null);
-  const viewerRef = useRef(viewer);
-  viewerRef.current = viewer;
   const user = getUser();
 
   // Per-section sort direction, seeded from the persisted preference. Held in
@@ -120,7 +120,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   };
 
   // Whether the fullscreen viewer keeps its overlay permanently hidden. Held in
-  // state so the header button's icon reflects it; Fullscreen reads the persisted
+  // state so the header button's icon reflects it; the viewer reads the persisted
   // value at open time, so no grid remount is needed on flip and focus stays put.
   const [overlayHidden, setOverlayHiddenState] = useState(getOverlayHidden);
   // Transient confirmation shown at the bottom when the overlay toggle flips, so
@@ -185,15 +185,19 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   }, [route, album]);
 
   const openViewer = useCallback((assets: Asset[], index: number) => {
-    setViewer({ assets, index });
+    setViewer({ assets, index, seen: memorySeen() });
   }, []);
 
   // update the live asset list in the viewer as the grid loads more buckets
   const handleAssetsChange = useCallback((assets: Asset[]) => {
-    setViewer((v) => (v ? { ...v, assets } : null));
+    setViewer((v) => {
+      if (!v) return null;
+      const next = extendList(v.assets, assets);
+      return next === v.assets ? v : { ...v, assets: next };
+    });
   }, []);
 
-  // called by Fullscreen when near the end; delegates to the mounted grid
+  // called by the viewer when near the end; delegates to the mounted grid
   const handleNearEnd = useCallback(() => {
     loadNextRef.current?.();
   }, []);
@@ -215,12 +219,12 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // (the user may have paged left/right inside the viewer). The grid was never
   // unmounted, so its scroll position and loaded buckets are intact and the
   // target thumb is already in the DOM; focus() also scrolls it into view.
-  // Stable identity (no viewer dep) so Fullscreen's key-handler effect doesn't
+  // Stable identity (no viewer dep) so the viewer's key-handler effect doesn't
   // tear down and re-attach on every bucket load (which would create a brief gap
-  // where key presses are dropped). viewerRef always mirrors the latest viewer.
+  // where key presses are dropped).
   const closeViewer = useCallback(
-    (index: number) => {
-      const id = viewerRef.current?.assets[index]?.id;
+    (shown: Asset | null) => {
+      const id = shown?.id;
       setViewer(null);
       setTimeout(() => {
         const el = id
@@ -260,14 +264,14 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   }, [sidebarOpen]);
 
   // Back hierarchy:
-  //  viewer        -> close to grid (Fullscreen handles its own Back; this is
+  //  viewer        -> close to grid (the viewer handles its own Back; this is
   //                   the fallback if it ever bubbles up)
   //  album open    -> back to album list
   //  sidebar open  -> quit via webOS's native exit
   //  grid (closed) -> open sidebar, focus the active tab
   const onBack = useCallback(() => {
     if (viewer) {
-      closeViewer(viewer.index);
+      closeViewer(viewer.assets[viewer.index] ?? null);
     } else if (album) {
       setAlbum(null);
     } else if (sidebarOpen) {
@@ -316,12 +320,15 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     <div class="home" ref={rootRef}>
       {/* Viewer is an overlay (position:fixed), NOT a replacement for the grid.
           Keeping the grid mounted underneath preserves its scroll position and
-          loaded buckets, so closing returns to the exact spot. */}
+          loaded buckets, so closing returns to the exact spot. It's the
+          slideshow player, opened paused on the chosen photo. */}
       {viewer && (
-        <Fullscreen
+        <WallpaperPlayer
+          mode="viewer"
           assets={viewer.assets}
-          index={viewer.index}
-          onClose={closeViewer}
+          startIndex={viewer.index}
+          seen={viewer.seen}
+          onExit={closeViewer}
           onNearEnd={handleNearEnd}
         />
       )}
@@ -467,4 +474,21 @@ export function Home({ onLogout }: { onLogout: () => void }) {
       </main>
     </div>
   );
+}
+
+// The viewer's list only ever grows at its end. The grid lists every loaded
+// bucket in timeline order, so a bucket loaded ABOVE the photos the viewer
+// already holds would land in the middle — shifting every index under the
+// player, whose play order and prefetch cache are keyed by position. Only
+// what follows the viewer's last photo is appended; returns `cur` itself when
+// nothing new came after it.
+function extendList(cur: Asset[], grid: Asset[]): Asset[] {
+  const last = cur[cur.length - 1];
+  if (!last) return grid;
+  for (let k = grid.length - 1; k >= 0; k--) {
+    if (grid[k].id === last.id) {
+      return k === grid.length - 1 ? cur : cur.concat(grid.slice(k + 1));
+    }
+  }
+  return cur;
 }

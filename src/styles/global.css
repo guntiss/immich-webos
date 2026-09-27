@@ -1259,84 +1259,16 @@ select {
   color: var(--fg);
 }
 
-/* ---------- Fullscreen viewer (photo + video) ---------- */
-.fs {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 50; /* above the sidebar (6) — viewer is a full overlay */
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-.fs-img,
-.fs-video {
-  /* fill the container and scale UP to it; contain preserves aspect (no crop).
-     width/height auto would cap at the image's intrinsic px (~1440), leaving the
-     preview small and centered on a 4K TV while the upscaled thumb placeholder
-     fills the screen — the "shrink on load" jump. */
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-/* thumbnail placeholder shown while the full preview fetches. position:absolute
-   so it fills the .fs container without disturbing the flex-centered .fs-img. */
-.fs-thumb-ph {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-.fs-video {
-  width: 100%;
-  height: 100%;
-}
-/* Live Photo motion clip, layered over the still while it autoplays. Absolute
-   so the still underneath shows through the instant it ends (motionOn -> false). */
-/* Live Photo motion clip plays UNDERNEATH the still (z-index 0). The still is
-   kept on top and fades out to reveal it, so an opaque layer always covers the
-   webOS hardware video plane — the plane is never exposed through a transparent
-   element, which is what caused the black flash / freeze-on-first-frame. */
-.fs-motion {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  z-index: 0;
-}
-/* still layered above the motion clip; fades out to reveal the playing video */
-.fs-img {
-  position: relative;
-  z-index: 1;
-  transition: opacity 600ms ease-in-out;
-}
-.fs-img.motion-revealed {
-  opacity: 0;
-}
-/* zoomed still: transform is driven inline (scale + pan). Show a grab cursor
-   for the magic-remote pointer / mouse; the opacity transition above must not
-   apply to transform or panning would lag, so pin the transition to opacity. */
-.fs-img.zoomed {
-  cursor: grab;
-  transition: opacity 600ms ease-in-out;
-}
+/* ---------- Photo viewer pieces (shared with the slideshow player) ---------- */
 
 /* zoom minimap: overview of the whole photo, top-right, with a rectangle
    marking the visible region. z-index above the media, below nothing that
    needs clicking (it's non-interactive). */
 .fs-minimap {
   position: absolute;
-  bottom: 24px;
+  top: 24px;
   right: 24px;
-  z-index: 3;
+  z-index: 3; /* above both crossfade layers (current z1, outgoing z2) */
   border: 2px solid rgba(255, 255, 255, 0.7);
   border-radius: 6px;
   overflow: hidden;
@@ -1381,52 +1313,6 @@ select {
   }
 }
 
-/* Overlay: hidden by default, shown when .fs has .show-ui (paused / activity) */
-.fs-ui {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 2; /* above the media layers (motion clip z0, still z1) */
-  opacity: 0;
-  transition: opacity 0.25s ease;
-  pointer-events: none;
-}
-.fs.show-ui .fs-ui {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.fs-top {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 24px 32px;
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.7), transparent);
-}
-.fs-top-right {
-  display: flex;
-  align-items: center;
-}
-.fs-top-right > * + * {
-  margin-left: 12px;
-}
-.fs-location {
-  font-size: 17px;
-  font-weight: 500;
-  color: var(--fg);
-  opacity: 0.9;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 420px;
-}
-
 .fs-btn {
   display: flex;
   align-items: center;
@@ -1451,11 +1337,6 @@ select {
   border-color: var(--immich-dark-primary);
   background: rgba(60, 60, 70, 0.9);
 }
-/* Live button while its motion clip is playing. */
-.fs-btn.active {
-  color: var(--immich-dark-primary);
-}
-
 /* side prev/next arrows */
 .fs-arrow {
   position: absolute;
@@ -1485,17 +1366,17 @@ select {
   background: rgba(40, 40, 48, 0.85);
 }
 
-/* bottom transport + seek bar */
-.fs-bottom {
+/* video transport + seek bar, above the options bar */
+.wp-transport {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 56px;
+  bottom: 112px;
   display: flex;
   align-items: center;
   padding: 0 48px;
 }
-.fs-bottom > * + * {
+.wp-transport > * + * {
   margin-left: 18px;
 }
 .fs-time {
@@ -1856,6 +1737,36 @@ select {
   height: 100%;
   object-fit: cover;
 }
+/* Live Photo motion clip, under the current crossfade layer (whose still fades
+   out to reveal it). Carries the still's blurred fill as its own background; the
+   <video> is sized inline to the photo's on-screen rect. */
+.wp-motion {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1; /* same as the current layer, but earlier in the DOM = beneath it */
+}
+.wp-motion > video {
+  position: absolute;
+  object-fit: contain;
+}
+/* viewer: the current item can't be shown (unsupported video / failed photo) */
+.wp-player-msg {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3; /* above both crossfade layers (current z1, outgoing z2) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  color: var(--fg);
+  font-size: 22px;
+}
 .wp-player-spin {
   position: absolute;
   inset: 0;
@@ -1869,6 +1780,8 @@ select {
   position: absolute;
   left: 48px;
   bottom: 44px;
+  max-width: 45%; /* the options bar shares the bottom edge on the right */
+  pointer-events: none;
   z-index: 3; /* above both crossfade layers (current z1, outgoing z2) */
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
   /* opacity-only fade: no transform, so the blurred text-shadow never
@@ -1879,6 +1792,9 @@ select {
   font-size: 26px;
   font-weight: 700;
   color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wp-player-date {
   font-size: 19px;
@@ -1960,6 +1876,29 @@ select {
   color: #0a0a0a;
   background: var(--immich-dark-primary);
 }
+/* labeled pill button (Play/Pause, video quality) */
+.wp-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.wp-text-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+}
+.wp-text-btn.active {
+  color: #0a0a0a;
+  background: var(--immich-dark-primary);
+}
 /* speed selector, top-right */
 .wp-speed {
   display: flex;
@@ -1988,7 +1927,8 @@ select {
 }
 /* d-pad focus ring on the option bar (Up raises + focuses the bar) */
 .wp-player-top .wp-icon-btn:focus,
-.wp-player-top .wp-speed-btn:focus {
+.wp-player-top .wp-speed-btn:focus,
+.wp-player-top .wp-text-btn:focus {
   outline: none;
   box-shadow: 0 0 0 3px var(--immich-dark-primary);
 }

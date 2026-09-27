@@ -6,6 +6,7 @@ import {
   thumbnailUrl,
   videoStreamUrl,
   originalUrl,
+  originalStreamUrl,
   getAssetLocation,
   getAssetOrientation,
   getAssetPixels,
@@ -14,30 +15,50 @@ import { Key, isBack, dirFromKey } from '../nav/keys';
 import { fetchStations, Station } from '../api/radio';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
+import {
+  getLivePlay,
+  setLivePlay,
+  getVideoQuality,
+  setVideoQuality,
+  VideoQuality,
+  getOverlayHidden,
+  getViewerMusic,
+  setViewerMusic,
+} from '../settings';
 import { aimAtFaces } from './faceCrop';
 import { SeenStore } from './wallpaperSeen';
 
 interface Props {
   assets: Asset[];
-  // 'photos': muted stills slideshow with the dwell-speed + background-music
-  // controls. 'videos': clips play with their ORIGINAL audio, and the speed +
-  // music controls are hidden (webOS has one hardware media pipeline — a
-  // radio stream and a video can't decode at the same time, the video plane
-  // just goes black).
-  mode: 'photos' | 'videos';
-  onExit: () => void;
+  // 'photos': the Slideshow page's show — shuffled, auto-advancing, landscape
+  // stills face-cropped to fill the screen, background music on.
+  // 'viewer': the photo viewer opened from a grid — starts PAUSED on
+  // `startIndex` in list order and only runs as a slideshow once Play is
+  // pressed. Every photo is shown whole over a blurred fill, photos zoom with
+  // the scroll wheel, Live Photos play their motion, and videos play with their
+  // own sound and a seek bar. The music is let go while a video is up: webOS
+  // has one hardware media pipeline, and a radio stream and a video can't
+  // decode at the same time (the video plane just goes black).
+  mode: 'photos' | 'viewer';
+  startIndex?: number;
+  // `shown` is the item on screen at exit, so the grid can refocus it
+  onExit: (shown: Asset | null) => void;
   // called when nearing the end of the loaded list so more buckets can load
   onNearEnd?: () => void;
   // called when the user toggles shuffle. The feed randomizes its remaining
   // bucket order so shuffle spans the whole source, not just the loaded page.
   onShuffleChange?: (on: boolean) => void;
-  // what this source has already shown (persisted): shuffle skips these
+  // what this source has already shown: shuffle skips these
   seen: SeenStore;
 }
 
 const HIDE_MS = 3000;
+const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
 const BAR_IDLE_MS = 8000; // hide the focused bar after this long with no input
 const CAPTION_DELAY_MS = 1000; // location/date animate in this long after a transition
+const CAPTION_BROWSE_MS = 250; // ...or this long while paused and stepping by hand
+const FADE_AUTO_MS = 900; // crossfade on an automatic advance
+const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
 const SPEEDS = [
   { label: '5s', ms: 5000 },
   { label: '10s', ms: 10000 },
@@ -53,7 +74,11 @@ const GENRES = [
 const DEFAULT_GENRE = 'lofi'; // music starts on with this genre (photos mode)
 const WINDOW = 2; // stills prefetched ahead (each holds a decoded bitmap in TV RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
-const PREBUFFER_S = 5; // seconds of the NEXT video to pre-download
+const SEEK_STEP = 10; // seconds
+const ZOOM_STEP = 1.2; // scale multiplier per scroll-wheel tick
+const MAX_ZOOM = 6;
+const PAN_KEY_STEP = 120; // px the d-pad nudges a zoomed photo
+const MOTION_FADE_MS = 600; // Live Photo still fades out/in over this long
 
 // Stills are decoded off the main thread into an ImageBitmap and shown on a
 // canvas where the TV supports it (see loadBitmapStill). Chromium 81+
@@ -82,7 +107,10 @@ interface Cached {
   ready: boolean;
   decoded: boolean;
   error?: boolean; // failed to load — advance past it
+  gone?: boolean; // torn down: its element's late events are ignored
   el?: HTMLVideoElement; // for video: the buffering, reusable element
+  q?: VideoQuality; // for video: which stream it's playing
+  settled?: Promise<void>; // for video: resolves once ready (or failed for good)
   img?: Still; // for still: the fully-decoded, reusable <img>/canvas element
 }
 
@@ -94,33 +122,55 @@ interface Frame {
   img?: Still;
 }
 
-// Fullscreen auto-advancing wallpaper slideshow. Stills crossfade on a timer,
-// pre-decoded (original quality when it fits the screen, else the preview);
-// videos buffer in chunks (progressive range streaming, like
-// the grid) and play muted to the end, then advance. Navigation (auto or d-pad)
-// only moves to an item whose media is loaded — never onto a black/unready
-// frame. Loops forever. Owns its own key listener; the shell disables its
-// remote handler while this is up.
-export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, onShuffleChange, seen }: Props) {
-  const [i, setI] = useState(0);
+// Keep a zoomed photo's pan within bounds so it can't be dragged fully off
+// screen: at scale z the image overhangs the viewport by (z-1) on each axis,
+// so the max offset is half of that overhang.
+function clampPan(x: number, y: number, z: number): { x: number; y: number } {
+  const maxX = ((z - 1) * window.innerWidth) / 2;
+  const maxY = ((z - 1) * window.innerHeight) / 2;
+  return {
+    x: Math.max(-maxX, Math.min(maxX, x)),
+    y: Math.max(-maxY, Math.min(maxY, y)),
+  };
+}
+
+// Fullscreen photo/video player, used both as the Slideshow page's show and as
+// the viewer opened from a grid (see `mode`). Stills crossfade, pre-decoded
+// (original quality when it fits the screen, else the preview); videos buffer
+// in chunks (progressive range streaming, like the grid). Navigation (auto or
+// d-pad) only moves to an item whose media is loaded — never onto a
+// black/unready frame. The show loops. Owns its own key listener; the shell
+// disables its remote handler while this is up.
+export function WallpaperPlayer({
+  assets: assetsProp,
+  mode,
+  startIndex = 0,
+  onExit,
+  onNearEnd,
+  onShuffleChange,
+  seen,
+}: Props) {
+  const viewer = mode === 'viewer';
+  const [i, setI] = useState(() => Math.max(0, Math.min(startIndex, assetsProp.length - 1)));
   // Play order: `order` is a permutation of indices into assetsProp; `assets`
-  // (used everywhere below) is the sequenced list the show walks. Shuffled by
-  // default (a random permutation); turning shuffle off restores identity order.
-  // Keeping playback consecutive over `assets` preserves the prefetch window,
-  // eviction, and near-end paging unchanged — only the mapping changes. The
-  // feed starts shuffled too, so the first batch is already unseen items.
-  const [shuffle, setShuffle] = useState(true);
-  const shuffleRef = useRef(true);
+  // (used everywhere below) is the sequenced list the show walks. The slideshow
+  // starts shuffled (a random permutation); the viewer, and turning shuffle
+  // off, use list order. Keeping playback consecutive over `assets` preserves
+  // the prefetch window, eviction, and near-end paging unchanged — only the
+  // mapping changes. The feed starts shuffled too, so the first batch is
+  // already unseen items.
+  const [shuffle, setShuffle] = useState(!viewer);
+  const shuffleRef = useRef(!viewer);
   shuffleRef.current = shuffle;
   const [order, setOrder] = useState<number[]>(() => {
     const ids = assetsProp.map((_, k) => k);
-    weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
+    if (!viewer) weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
     return ids;
   });
   const orderRef = useRef(order);
   orderRef.current = order;
-  // bumped by the shuffle toggle so the show effect re-runs even when index 0
-  // keeps the same asset (the frame on screen is kept at the head)
+  // bumped by the shuffle toggle so the show effect re-runs even when the
+  // index keeps the same asset (the frame on screen is carried over)
   const [epoch, setEpoch] = useState(0);
   const assets = useMemo(() => order.map((k) => assetsProp[k]).filter(Boolean), [order, assetsProp]);
   // Two persistent crossfade layers (A/B), long-lived DOM nodes that media
@@ -138,8 +188,15 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // 0.9s transition window (transitions are timestamp-based) and pop.
   const [fading, setFading] = useState(false);
   const fadeRaf = useRef(0);
-  const [paused, setPaused] = useState(false);
-  const [overlay, setOverlay] = useState(true);
+  // length of the running crossfade: shorter when stepping by hand
+  const [fadeMs, setFadeMs] = useState(FADE_AUTO_MS);
+  const manualRef = useRef(false); // the pending frame change came from a key press
+  // The viewer opens paused: it's for browsing, and Play turns it into a show.
+  const [paused, setPaused] = useState(viewer);
+  // Viewer with "hide player overlay" set in the grid header: the chrome never
+  // shows on its own. Read once at open; Up still raises the options bar.
+  const overlayHidden = useRef(viewer && getOverlayHidden()).current;
+  const [overlay, setOverlay] = useState(!overlayHidden);
   // when true, d-pad drives the options bar (left/right between buttons, Enter
   // activates) instead of the photo track. Entered with Up, left with Down/Back.
   const [focusBar, setFocusBar] = useState(false);
@@ -166,13 +223,17 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // keys off THIS, not the target index, so it only appears once the image has
   // actually loaded and been revealed — never over a still-loading frame.
   const [shownAsset, setShownAsset] = useState<Asset | null>(null);
+  const shownAssetRef = useRef<Asset | null>(null);
+  shownAssetRef.current = shownAsset;
+  // viewer: id of the current item when it couldn't be loaded at all
+  const [failed, setFailed] = useState<string | null>(null);
   // slideshow speed for stills (videos advance on their own end)
   const [intervalMs, setIntervalMs] = useState(DEFAULT_MS);
   const intervalRef = useRef(DEFAULT_MS);
   intervalRef.current = intervalMs;
-  // background music (Radio Browser internet-radio streams)
-  // on by default in photos mode; videos mode plays the clips' own audio
-  const [musicOn, setMusicOn] = useState(mode === 'photos');
+  // background music (Radio Browser internet-radio streams): on by default in
+  // the slideshow; the viewer remembers what it was last set to (off at first)
+  const [musicOn, setMusicOn] = useState(() => (viewer ? getViewerMusic() : true));
   const [genre, setGenre] = useState(DEFAULT_GENRE);
   const [stations, setStations] = useState<Station[]>([]);
   const [stIdx, setStIdx] = useState(0);
@@ -182,9 +243,39 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const [, setTick] = useState(0);
   const bump = useCallback(() => setTick((t) => t + 1), []);
 
-  // hold off the TV screen saver for as long as the player is open (no-op off
-  // webOS); cleanup releases it so the saver resumes on the timeline
-  useEffect(() => keepAwake(), []);
+  // ---- viewer: video transport, zoom, Live Photos ----
+  // The current video's own play state, apart from the show's `paused`:
+  // browsing, a clip autoplays and OK pauses just the clip. vidHoldRef is true
+  // once the user paused it (or it finished) so re-renders don't restart it.
+  const vidHoldRef = useRef(false);
+  const [vidPaused, setVidPaused] = useState(false);
+  const [progress, setProgress] = useState({ cur: 0, dur: 0, buffered: 0 });
+  const seekRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+  // zoom scales the still on screen; pan offsets it (px). Both reset per photo.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
+  const panDragRef = useRef({ on: false, x: 0, y: 0 });
+  const [miniSrc, setMiniSrc] = useState<string | null>(null);
+  // Live Photo: motionOn keeps the clip mounted; motionVisible fades the still
+  // on top of it out. The clip mounts hidden under the still and is revealed
+  // only once it has a decoded frame (no black buffering flash), and the still
+  // fades back in when it ends, before the clip unmounts.
+  // Persisted "live play" preference: whether Live Photos play their motion.
+  const [livePlay, setLivePlayState] = useState(getLivePlay);
+  const livePlayRef = useRef(livePlay);
+  livePlayRef.current = livePlay;
+  const [motionOn, setMotionOn] = useState(false);
+  const [motionVisible, setMotionVisible] = useState(false);
+  const motionRef = useRef<HTMLVideoElement>(null);
+  const motionFadeTimer = useRef<number | undefined>(undefined);
+
+  // hold off the TV screen saver while the show runs (no-op off webOS);
+  // cleanup releases it. The viewer only holds it while playing.
+  const awake = !viewer || !paused;
+  useEffect(() => (awake ? keepAwake() : undefined), [awake]);
 
   const keyRef = useRef(0);
   // off-screen full-screen container used to lay out + raster a decoded still at
@@ -193,9 +284,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const stageRef = useRef<HTMLDivElement>(null);
   const advanceTimer = useRef<number | undefined>(undefined);
   const hideTimer = useRef<number | undefined>(undefined);
-  const iRef = useRef(0);
+  const iRef = useRef(i);
   iRef.current = i;
-  const pausedRef = useRef(false);
+  const pausedRef = useRef(viewer);
   pausedRef.current = paused;
   // latest "advance forward" fn, so video element listeners never go stale
   const advanceRef = useRef<() => void>(() => {});
@@ -211,6 +302,13 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       }
     });
   }, []);
+
+  // Whether the current video should be playing: in the slideshow it follows
+  // the show's pause; in the viewer the clip keeps its own play state.
+  const wantPlay = useCallback(
+    () => (viewer ? !vidHoldRef.current : !pausedRef.current),
+    [viewer],
+  );
 
   const asset = assets[i];
 
@@ -241,6 +339,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     showARef.current = toA;
     setShowA(toA);
     setFading(false);
+    setFadeMs(manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS);
     fadeRaf.current = requestAnimationFrame(() => {
       fadeRaf.current = requestAnimationFrame(() => setFading(true));
     });
@@ -267,11 +366,17 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // Ready a decoded still for display. Portrait shots are shown WHOLE
   // (contain) over a blurred, dimmed copy of themselves filling the side bars
   // — a cover crop of a portrait on a 16:9 screen threw away over half the
-  // photo. Everything else keeps the face-aimed full-screen cover crop.
+  // photo. In the slideshow everything else keeps the face-aimed full-screen
+  // cover crop; the viewer shows every photo whole, blurring whatever bars its
+  // shape leaves.
   const prepStill = useCallback(
     async (img: Still, id: string): Promise<void> => {
       const [w, h] = stillSize(img);
-      if (h > w) {
+      if (viewer) {
+        const screen = (window.innerWidth || 1920) / (window.innerHeight || 1080);
+        if (h > 0 && Math.abs(w / h - screen) > 0.02) await applyBlurBackdrop(img, id);
+        await fitOnStage(img, 'contain');
+      } else if (h > w) {
         await applyBlurBackdrop(img, id);
         await fitOnStage(img, 'contain');
       } else {
@@ -279,7 +384,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         await fitOnStage(img, 'cover');
       }
     },
-    [fitOnStage],
+    [fitOnStage, viewer],
   );
 
   // Load a still as a canvas holding its decoded pixels. The bytes are decoded
@@ -319,6 +424,27 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     [prepStill],
   );
 
+  // Point a video at the other stream (transcoded <-> original), resuming where
+  // it was. The element stays the one on screen; only its source reloads.
+  const switchSrc = useCallback(
+    (e: Cached, id: string, q: VideoQuality) => {
+      const el = e.el;
+      if (!el) return;
+      const at = el.currentTime || 0;
+      e.q = q;
+      e.src = q === 'original' ? originalStreamUrl(id) : videoStreamUrl(id);
+      e.decoded = false;
+      e.error = false;
+      el.src = e.src;
+      el.load();
+      el.addEventListener('loadedmetadata', () => { if (at) el.currentTime = at; }, { once: true });
+      el.addEventListener('loadeddata', () => { e.decoded = true; bump(); }, { once: true });
+      if (wantPlay()) playEl(el);
+      bump();
+    },
+    [bump, playEl, wantPlay],
+  );
+
   // Load one item. Stills: see loadBitmapStill; on older sets, fetch the
   // original as a pre-decoded <img> (HEIC/RAW, or an original the TV won't
   // pre-decode, fall back to the preview JPEG). Videos: a hidden <video> that
@@ -331,28 +457,48 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
 
       if (a.isVideo) {
         const el = document.createElement('video');
-        el.src = videoStreamUrl(a.id);
-        // videos mode plays clips with their original audio; photos mode keeps
-        // any interleaved video muted (there shouldn't be one, but stay safe)
-        el.muted = mode !== 'videos';
+        // the viewer streams the quality last picked; its clips play with their
+        // own sound, while the slideshow keeps any video muted under its music
+        const q: VideoQuality = viewer ? getVideoQuality() : 'transcoded';
+        el.src = q === 'original' ? originalStreamUrl(a.id) : videoStreamUrl(a.id);
+        el.muted = !viewer;
+        if (viewer) el.style.objectFit = 'contain'; // the whole frame, not a crop
         el.playsInline = true;
         // only metadata while it's a lookahead/behind; promoted to 'auto' when
         // it becomes the current clip (keeps at most one clip fully buffering).
         el.preload = 'metadata';
         el.setAttribute('playsinline', '');
         if (el.muted) el.setAttribute('muted', '');
-        const e: Cached = { src: el.src, isVideo: true, blob: false, ready: false, decoded: false, el };
+        let settle = () => {};
+        const e: Cached = {
+          src: el.src,
+          isVideo: true,
+          blob: false,
+          ready: false,
+          decoded: false,
+          el,
+          q,
+          settled: new Promise<void>((res) => (settle = res)),
+        };
         // NOTE: no aimAtFaces on videos. webOS composites <video> on its own
         // hardware plane; a non-center object-position breaks the hole-punch
         // and the video renders black (fine on desktop). Face boxes for videos
         // are also detected on the thumbnail, so the data is unreliable anyway.
-        el.addEventListener('loadedmetadata', () => { e.ready = true; bump(); }, { once: true });
+        el.addEventListener('loadedmetadata', () => { e.ready = true; settle(); bump(); }, { once: true });
         el.addEventListener('loadeddata', () => { e.decoded = true; bump(); }, { once: true });
-        el.addEventListener('ended', () => { if (iRef.current === idx) advanceRef.current(); });
-        el.addEventListener('waiting', () => { if (!pausedRef.current) playEl(el); });
+        el.addEventListener('ended', () => {
+          if (iRef.current !== idx) return;
+          if (!pausedRef.current) advanceRef.current();
+          else vidHoldRef.current = true; // viewer: stay on the finished clip
+        });
+        el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
         el.addEventListener('error', () => {
+          if (e.gone) return;
+          // viewer: a transcode the TV can't play falls back to the original once
+          if (viewer && e.q === 'transcoded') return switchSrc(e, a.id, 'original');
           e.ready = true; // let nav move onto it so it can be skipped
           e.error = true;
+          settle();
           bump();
           if (iRef.current === idx) advanceRef.current();
         });
@@ -419,7 +565,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         return null;
       }
     },
-    [assets, bump, prepStill, loadBitmapStill, mode, playEl],
+    [assets, bump, prepStill, loadBitmapStill, viewer, playEl, wantPlay, switchSrc],
   );
 
   // Load one item into the cache. Concurrent calls for the same index share
@@ -458,36 +604,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     [loadFresh],
   );
 
-  // Pre-download ~PREBUFFER_S of a NEIGHBOUR video, then back off so it doesn't
-  // keep filling. Download-only (never play()) so it won't grab the TV's HW
-  // video decoder from the current clip. Once this item becomes current the
-  // show effect flips it back to full 'auto' buffering.
-  const capPrebuffer = useCallback((idx: number, e: Cached) => {
-    const el = e.el;
-    if (!el) return;
-    el.preload = 'auto';
-    const onProgress = () => {
-      if (iRef.current === idx) {
-        el.removeEventListener('progress', onProgress); // it's current now — let it buffer fully
-        return;
-      }
-      let end = 0;
-      try {
-        if (el.buffered.length) end = el.buffered.end(el.buffered.length - 1);
-      } catch {
-        /* buffered not readable yet */
-      }
-      if (end >= PREBUFFER_S) {
-        el.preload = 'metadata'; // best-effort: signal the browser to stop topping up
-        el.removeEventListener('progress', onProgress);
-      }
-    };
-    el.addEventListener('progress', onProgress);
-    el.load();
-  }, []);
-
   // tear down a cached element (release the blob, stop buffering, drop the DOM node)
   const teardown = (e: Cached) => {
+    e.gone = true;
     if (e.blob) revoke(e.src);
     if (e.el) {
       e.el.pause();
@@ -540,37 +659,38 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     if (added.length) setOrder((prev) => [...prev, ...added]);
   }, [assetsProp.length]);
 
-  // Toggle shuffle: rebuild the whole order, reset the cache, restart at 0.
-  // Shuffle skips everything this source has already shown (remembered across
-  // sessions) and keeps the frame on screen at the head, carrying its cache
-  // entry along, so the toggle doesn't cut away from it — and still plays when
-  // every loaded item has been seen (onNearEnd then pulls unseen ones).
+  // Toggle shuffle: rebuild the whole order and reset the cache, carrying the
+  // frame on screen (and its cache entry) over so the toggle doesn't cut away
+  // from it. Shuffle puts it at the head of a fresh random order that skips
+  // everything this source has already shown (remembered across sessions) —
+  // and still plays when every loaded item has been seen (onNearEnd then pulls
+  // unseen ones). Off goes back to list order, carrying on from that frame.
   const toggleShuffle = useCallback(() => {
     const next = !shuffleRef.current;
+    const cur = orderRef.current[iRef.current];
     let ids = assetsProp.map((_, k) => k);
-    let keep: Cached | undefined;
+    let at = 0;
     if (next) {
-      const cur = orderRef.current[iRef.current];
       ids = ids.filter((k) => k !== cur && !seen.has(assetsProp[k].id));
       weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
-      if (cur !== undefined) {
-        ids.unshift(cur);
-        keep = cache.current.get(iRef.current);
-        cache.current.delete(iRef.current);
-      }
+      if (cur !== undefined) ids.unshift(cur);
+    } else if (cur !== undefined) {
+      at = cur;
     }
+    const keep = cur !== undefined ? cache.current.get(iRef.current) : undefined;
+    cache.current.delete(iRef.current);
     clearCache();
-    if (keep) cache.current.set(0, keep);
+    if (keep) cache.current.set(at, keep);
     orderedUpTo.current = assetsProp.length;
     setShuffle(next);
     setOrder(ids);
-    setI(0);
+    setI(at);
     setEpoch((n) => n + 1);
     onShuffleChange?.(next); // widen the bound: feed randomizes remaining buckets
   }, [assetsProp, clearCache, onShuffleChange, seen]);
 
   // An index is navigable only once its media is loaded: a still's blob is ready,
-  // or a video has decoded its first frame (or errored, so it can be skipped).
+  // or a video has its metadata (or failed, so it can be skipped).
   const isLoaded = useCallback(
     (idx: number) => {
       const a = assets[idx];
@@ -583,15 +703,17 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   );
 
   const targetIndex = useCallback(
-    (delta: number) => {
+    (delta: number, manual: boolean) => {
       const n = iRef.current + delta;
+      // the viewer stops at either end when stepped by hand
+      if (viewer && manual && (n < 0 || n >= assets.length)) return iRef.current;
       if (n < 0) return assets.length - 1; // wrap to last
       // wrap to first — except while shuffling: hold for the next unseen batch
       // (onNearEnd) rather than replay what was just shown
       if (n >= assets.length) return shuffleRef.current ? iRef.current : 0;
       return n;
     },
-    [assets.length],
+    [assets.length, viewer],
   );
 
   // Move by delta, but ONLY onto a loaded frame (never a black/unready one).
@@ -604,8 +726,8 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const navToken = useRef(0);
   const [navPending, setNavPending] = useState(false);
   const advance = useCallback(
-    (delta: number, manual = false) => {
-      const n = targetIndex(delta);
+    (delta: number, manual = false): boolean => {
+      const n = targetIndex(delta, manual);
       // nowhere else to go (yet): leave the frame and timers alone; the auto
       // retry loop polls until onNearEnd has appended more
       if (n === iRef.current) return false;
@@ -613,6 +735,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       if (isLoaded(n)) {
         setNavPending(false);
         window.clearTimeout(advanceTimer.current);
+        manualRef.current = manual;
         setI(n);
         return true;
       }
@@ -624,15 +747,23 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       setNavPending(true);
       // stop the auto-advance timer so a dwell tick can't steal this intent
       window.clearTimeout(advanceTimer.current);
-      void loadInto(n).then(() => {
-        if (navToken.current !== token) return; // a newer press took over
-        setNavPending(false);
-        if (isLoaded(n)) setI(n);
-        else advanceRef.current(); // unloadable target — resume the show
-      });
+      void loadInto(n)
+        .then((e) => e?.settled) // a video: wait for its metadata
+        .then(() => {
+          if (navToken.current !== token) return; // a newer press took over
+          setNavPending(false);
+          if (isLoaded(n)) {
+            manualRef.current = true;
+            setI(n);
+          } else if (viewer) {
+            advance(delta + Math.sign(delta), true); // unloadable: step over it
+          } else {
+            advanceRef.current(); // unloadable target — resume the show
+          }
+        });
       return false;
     },
-    [targetIndex, isLoaded, loadInto],
+    [targetIndex, isLoaded, loadInto, viewer],
   );
 
   // Auto-advance: try to step forward; if the next frame isn't loaded yet, keep
@@ -654,25 +785,30 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     const date = fmtDate(a.createdAt);
     getAssetLocation(a.id)
       .then((r) => {
-        const parts = [r.city, r.state, r.country].filter(Boolean) as string[];
-        const deduped = parts.filter((p, k) => p !== parts[k - 1]);
-        geoCache.current.set(a.id, { loc: deduped.length ? deduped.join(', ') : null, date });
+        geoCache.current.set(a.id, { loc: fmtPlace(r), date });
       })
       .catch(() => { geoCache.current.set(a.id, { loc: null, date }); });
   }, []);
 
-  // load + show the current asset, prefetch ahead, evict the rest
+  // load + show the current asset, prefetch around it, evict the rest
   useEffect(() => {
     if (!asset) return;
     let alive = true;
     const key = ++keyRef.current;
     let stallTimer: number | undefined;
     window.clearTimeout(advanceTimer.current);
+    // a new item: its clip (if any) starts in play intent, at zero
+    vidHoldRef.current = false;
+    setVidPaused(false);
+    setProgress({ cur: 0, dur: 0, buffered: 0 });
 
     loadInto(i)
       .then((e) => {
         if (!alive) return;
-        if (!e) return scheduleNext(500); // unloadable still — skip quickly
+        if (!e) {
+          if (viewer) setFailed(asset.id);
+          return scheduleNext(500); // unloadable still — skip quickly
+        }
         if (!e.isVideo) {
           showFrame({ key, asset, src: e.src, img: e.img });
           scheduleNext(intervalRef.current); // stills auto-advance on a timer
@@ -694,7 +830,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
           // earlier requestVideoFrameCallback/rAF scheme) left the TV's video
           // plane black. The earlier black frames this deferral chased were the
           // element-steal bug, fixed properly in showFrame/the show effect.
-          if (!pausedRef.current) playEl(el);
+          if (wantPlay()) playEl(el);
           showFrame({ key, asset, src: e.src, el });
         };
         if (e.decoded) reveal();
@@ -711,7 +847,8 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         const ticks = Math.max(1, Math.round(VIDEO_STALL_MS / 2000));
         stallTimer = window.setInterval(() => {
           if (!alive || iRef.current !== i) return;
-          if (pausedRef.current) { lastT = -1; return; } // don't skip a paused clip
+          // don't skip a paused clip, or one the viewer is just showing
+          if (pausedRef.current || !wantPlay()) { lastT = -1; return; }
           const t = el.currentTime || 0;
           if (t > lastT) { lastT = t; strikes = 0; return; }
           if (++strikes >= ticks) { window.clearInterval(stallTimer); scheduleNext(0); }
@@ -720,26 +857,28 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       .catch(() => alive && scheduleNext(500))
       .then(prefetch);
 
-    // Prefetch the window ONE AT A TIME, nearest first, once the current frame
-    // is in: loading everything at once made the frames race each other for
-    // the TV's bandwidth and decoder, so the one needed next landed last. All
-    // stills in the window, but only the NEXT video ahead (videos are heavy to
-    // buffer — one lookahead is enough to keep nav unblocked). Stops when the
-    // show moves on; the next run resumes from cache.
+    // Prefetch ONE AT A TIME, nearest first, once the current frame is in:
+    // loading everything at once made the frames race each other for the TV's
+    // bandwidth and decoder, so the one needed next landed last. The slideshow
+    // fills the window ahead (all stills, but only the NEXT video — videos are
+    // heavy to buffer). The viewer is stepped both ways, so it readies the one
+    // behind too, and loads a video only once it's the one shown. Stops when
+    // the show moves on; the next run resumes from cache.
     async function prefetch() {
+      const ks: number[] = [];
+      if (viewer) ks.push(i + 1, i - 1, i + 2);
+      else for (let k = i + 1; k <= i + WINDOW; k++) ks.push(k);
       let vids = 0;
-      for (let k = i + 1; k <= i + WINDOW && k < assets.length; k++) {
+      for (const k of ks) {
         if (!alive) return;
-        prefetchGeoFor(assets[k]);
-        if (assets[k].isVideo) {
-          if (vids < 1) {
-            vids++;
-            const e = await loadInto(k);
-            if (e?.el) capPrebuffer(k, e); // ~5s prebuffer
-          }
-        } else {
-          await loadInto(k);
+        const a = assets[k];
+        if (!a) continue;
+        prefetchGeoFor(a);
+        if (a.isVideo) {
+          if (viewer || vids >= 1) continue;
+          vids++;
         }
+        await loadInto(k);
       }
     }
     evict(i);
@@ -793,6 +932,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     if (!shownAsset) return;
     let alive = true;
     const date = fmtDate(shownAsset.createdAt);
+    const delay = pausedRef.current ? CAPTION_BROWSE_MS : CAPTION_DELAY_MS;
 
     const cached = geoCache.current.get(shownAsset.id);
     if (cached) {
@@ -801,7 +941,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       const newKey = `${cached.loc ?? ''}|${cached.date}`;
       const curKey = `${metaRef.current.loc ?? ''}|${metaRef.current.date}`;
       if (newKey !== curKey) setMeta({ loc: null, date: '' });
-      const t = window.setTimeout(() => { if (alive) setMeta(cached); }, CAPTION_DELAY_MS);
+      const t = window.setTimeout(() => { if (alive) setMeta(cached); }, delay);
       return () => { alive = false; window.clearTimeout(t); };
     }
 
@@ -818,13 +958,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         setMeta(result);
       }
     };
-    const t = window.setTimeout(() => { delayed = true; commit(); }, CAPTION_DELAY_MS);
+    const t = window.setTimeout(() => { delayed = true; commit(); }, delay);
     getAssetLocation(shownAsset.id)
-      .then((r) => {
-        const parts = [r.city, r.state, r.country].filter(Boolean) as string[];
-        const deduped = parts.filter((p, k) => p !== parts[k - 1]);
-        loc = deduped.length ? deduped.join(', ') : null;
-      })
+      .then((r) => { loc = fmtPlace(r); })
       .catch(() => { loc = null; })
       .finally(() => { resolved = true; commit(); });
     return () => {
@@ -840,20 +976,26 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       window.clearTimeout(advanceTimer.current);
       window.clearTimeout(hideTimer.current);
       window.clearTimeout(pillTimer.current);
+      window.clearTimeout(motionFadeTimer.current);
       for (const e of held.values()) teardown(e);
       held.clear();
       seen.flush();
     };
   }, []);
 
-  // pause/resume: stop the timer + current video, or resume playback/rotation
+  // pause/resume: stop the timer (and in the slideshow the current video), or
+  // resume playback/rotation. The viewer's clip keeps its own play state.
   useEffect(() => {
     const cur = cache.current.get(iRef.current);
     if (paused) {
       window.clearTimeout(advanceTimer.current);
-      cur?.el?.pause();
+      if (!viewer) cur?.el?.pause();
     } else if (cur?.isVideo) {
-      if (cur.el) playEl(cur.el);
+      if (cur.el?.ended) scheduleNext(0); // a clip that already finished: move on
+      else if (cur.el) {
+        vidHoldRef.current = false;
+        playEl(cur.el);
+      }
     } else {
       scheduleNext(intervalRef.current);
     }
@@ -867,9 +1009,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   }, [intervalMs]);
 
   const poke = useCallback(() => {
-    setOverlay(true);
     window.clearTimeout(hideTimer.current);
     if (focusBarRef.current) {
+      setOverlay(true);
       // focused but idle: after a longer window, hide the bar AND drop focus
       hideTimer.current = window.setTimeout(() => {
         setFocusBar(false);
@@ -879,8 +1021,13 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       }, BAR_IDLE_MS);
       return;
     }
-    hideTimer.current = window.setTimeout(() => setOverlay(false), HIDE_MS);
-  }, []);
+    if (overlayHidden) {
+      setOverlay(false);
+      return;
+    }
+    setOverlay(true);
+    hideTimer.current = window.setTimeout(() => setOverlay(false), viewer ? VIEWER_HIDE_MS : HIDE_MS);
+  }, [overlayHidden, viewer]);
 
   // Walk a live list of buttons, wrapping at both ends, moving focus by `delta`.
   const walk = (btns: HTMLButtonElement[], delta: number) => {
@@ -897,7 +1044,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const genreBtns = () =>
     Array.from(barRef.current?.querySelectorAll<HTMLButtonElement>('.wp-genres button') ?? []);
   // Move d-pad focus among the option-bar buttons (live query — the button set
-  // changes with mode and whether music is on). Wraps at both ends.
+  // changes with the item shown and whether music is on). Wraps at both ends.
   const focusBarBtn = useCallback((delta: number) => walk(barBtns(), delta), []);
   const focusGenreBtn = useCallback((delta: number) => walk(genreBtns(), delta), []);
   const focusMusicBtn = useCallback(() => {
@@ -928,7 +1075,31 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     pillTimer.current = window.setTimeout(() => setPill('none'), 1400);
   }, []);
 
+  // Start or stop the show. Starting it drops any zoom so the photos come up
+  // whole.
+  const setPlaying = useCallback(
+    (on: boolean) => {
+      if (on === !pausedRef.current) return;
+      if (on) {
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      }
+      setPaused(!on);
+      flashPill(on ? 'playing' : 'paused');
+    },
+    [flashPill],
+  );
+
+  const exit = useCallback(() => {
+    onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
+  }, [onExit, assets]);
+
   // --- background music ---
+  // The viewer lets go of the stream while a video is the current item.
+  const musicHeld = viewer && !!asset?.isVideo;
+  const musicWantRef = useRef(false);
+  musicWantRef.current = musicOn && !musicHeld;
+
   const loadGenre = useCallback(async (tag: string) => {
     const st = await fetchStations(tag);
     setStations(st);
@@ -937,13 +1108,11 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
 
   const toggleMusic = useCallback(async () => {
     poke();
-    if (musicOn) {
-      setMusicOn(false);
-      return;
-    }
-    setMusicOn(true);
-    if (stations.length === 0) await loadGenre(genre);
-  }, [musicOn, stations.length, genre, loadGenre, poke]);
+    const next = !musicOn;
+    setMusicOn(next);
+    if (viewer) setViewerMusic(next);
+    if (next && stations.length === 0) await loadGenre(genre);
+  }, [musicOn, stations.length, genre, loadGenre, poke, viewer]);
 
   const selectGenre = useCallback(
     (tag: string) => {
@@ -964,13 +1133,18 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-    if (musicOn && stations[stIdx]) {
+    if (musicOn && !musicHeld && stations[stIdx]) {
       if (a.src !== stations[stIdx].url) a.src = stations[stIdx].url;
       void a.play().catch(() => {});
+    } else if (musicHeld && a.getAttribute('src')) {
+      // unload rather than pause, so the video gets the media pipeline to itself
+      a.pause();
+      a.removeAttribute('src');
+      a.load();
     } else {
       a.pause();
     }
-  }, [musicOn, stIdx, stations]);
+  }, [musicOn, musicHeld, stIdx, stations]);
 
   // music starts on: fetch the default genre's stations as the player opens
   useEffect(() => {
@@ -989,6 +1163,266 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     poke();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ---- viewer: the frame on screen ----
+  const visible = showA ? layers.a : layers.b;
+  const visibleImg = viewer ? visible?.img ?? null : null;
+  const visibleVid = viewer ? visible?.el ?? null : null;
+  const liveId = viewer && visible && !visible.asset.isVideo ? visible.asset.livePhotoVideoId ?? null : null;
+
+  // Video transport: follow the clip on screen.
+  const readProgress = useCallback((v: HTMLVideoElement) => {
+    let buffered = 0;
+    try {
+      for (let k = 0; k < v.buffered.length; k++) {
+        if (v.currentTime >= v.buffered.start(k) && v.currentTime <= v.buffered.end(k)) {
+          buffered = v.buffered.end(k);
+          break;
+        }
+      }
+    } catch {
+      /* buffered not readable yet */
+    }
+    setProgress({ cur: v.currentTime, dur: v.duration || 0, buffered });
+  }, []);
+  const updateProgress = useCallback(() => {
+    const v = cache.current.get(iRef.current)?.el;
+    if (v) readProgress(v);
+  }, [readProgress]);
+
+  useEffect(() => {
+    const v = visibleVid;
+    if (!v) return;
+    const update = () => readProgress(v);
+    const onPlay = () => setVidPaused(false);
+    // paused (by the user, or at the end): bring the transport up
+    const onPause = () => {
+      setVidPaused(true);
+      update();
+      poke();
+    };
+    const evs = ['timeupdate', 'progress', 'durationchange', 'loadedmetadata', 'seeked'];
+    evs.forEach((n) => v.addEventListener(n, update));
+    v.addEventListener('play', onPlay);
+    v.addEventListener('pause', onPause);
+    setVidPaused(v.paused);
+    update();
+    return () => {
+      evs.forEach((n) => v.removeEventListener(n, update));
+      v.removeEventListener('play', onPlay);
+      v.removeEventListener('pause', onPause);
+    };
+  }, [visibleVid, readProgress, poke]);
+
+  const toggleVideo = useCallback(() => {
+    const v = cache.current.get(iRef.current)?.el;
+    if (!v) return;
+    if (v.paused) {
+      vidHoldRef.current = false;
+      playEl(v);
+    } else {
+      vidHoldRef.current = true;
+      v.pause();
+      setPlaying(false); // pausing a clip mid-show stops the show too
+    }
+  }, [playEl, setPlaying]);
+
+  const seek = useCallback(
+    (delta: number) => {
+      const v = cache.current.get(iRef.current)?.el;
+      if (!v) return;
+      v.currentTime = Math.max(0, Math.min(v.duration || 1e9, v.currentTime + delta));
+      updateProgress();
+    },
+    [updateProgress],
+  );
+
+  // Pointer scrubbing on the seek bar — works for PC mouse and the LG
+  // magic-remote pointer (both emit pointer events). Maps the x position within
+  // the bar to a fraction of duration. Used for a single click (jump) and for
+  // drag (scrub): pointermove updates while a drag is active.
+  const seekToClientX = useCallback(
+    (clientX: number) => {
+      const v = cache.current.get(iRef.current)?.el;
+      const bar = seekRef.current;
+      if (!v || !bar || !v.duration) return;
+      const rect = bar.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      v.currentTime = frac * v.duration;
+      updateProgress();
+    },
+    [updateProgress],
+  );
+  const onSeekDown = useCallback(
+    (e: PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      draggingRef.current = true;
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      seekToClientX(e.clientX);
+      poke();
+    },
+    [seekToClientX, poke],
+  );
+  const onSeekMove = useCallback(
+    (e: PointerEvent) => {
+      if (!draggingRef.current) return;
+      seekToClientX(e.clientX);
+      poke();
+    },
+    [seekToClientX, poke],
+  );
+  const onSeekUp = useCallback((e: PointerEvent) => {
+    draggingRef.current = false;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+  }, []);
+
+  const cycleQuality = useCallback(() => {
+    const e = cache.current.get(iRef.current);
+    const a = assets[iRef.current];
+    if (!e?.el || !a) return;
+    const next: VideoQuality = e.q === 'original' ? 'transcoded' : 'original';
+    setVideoQuality(next); // remember for later videos + app restarts
+    switchSrc(e, a.id, next);
+    poke();
+  }, [assets, switchSrc, poke]);
+
+  // Zoom: scale the still on screen. The element lives outside Preact (it's
+  // reparented from the cache), so the transform is set on it directly. A new
+  // frame resets the zoom and clears the transform left on the old element.
+  const zoomElRef = useRef<Still | null>(null);
+  useEffect(() => {
+    const prev = zoomElRef.current;
+    if (prev !== visibleImg) {
+      if (prev) prev.style.transform = '';
+      zoomElRef.current = visibleImg;
+      if (zoomRef.current !== 1) {
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      }
+      return;
+    }
+    if (visibleImg) {
+      visibleImg.style.transform =
+        zoom > 1 ? `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` : '';
+    }
+  }, [visibleImg, zoom, pan]);
+
+  const zoomBy = useCallback((inward: boolean) => {
+    const z = zoomRef.current;
+    const next = Math.min(MAX_ZOOM, Math.max(1, inward ? z * ZOOM_STEP : z / ZOOM_STEP));
+    setZoom(next);
+    setPan((p) => (next <= 1.001 ? { x: 0, y: 0 } : clampPan(p.x, p.y, next)));
+  }, []);
+
+  // Scroll wheel (LG magic remote / mouse) zooms a still while browsing.
+  const onWheel = useCallback(
+    (e: WheelEvent) => {
+      if (!visibleImg || !pausedRef.current) return;
+      e.preventDefault();
+      poke();
+      zoomBy(e.deltaY < 0);
+    },
+    [visibleImg, poke, zoomBy],
+  );
+
+  // Pointer drag pans a zoomed photo (magic-remote pointer / mouse). Handlers
+  // sit on the player root and fire via bubbling; presses on the controls are
+  // left alone so they still click.
+  const onImgDown = useCallback(
+    (e: PointerEvent) => {
+      if (zoomRef.current <= 1) return;
+      if ((e.target as HTMLElement).closest('button, .fs-seek')) return;
+      e.preventDefault();
+      panDragRef.current = { on: true, x: e.clientX, y: e.clientY };
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      poke();
+    },
+    [poke],
+  );
+  const onImgMove = useCallback(
+    (e: PointerEvent) => {
+      if (!panDragRef.current.on) return;
+      const dx = e.clientX - panDragRef.current.x;
+      const dy = e.clientY - panDragRef.current.y;
+      panDragRef.current.x = e.clientX;
+      panDragRef.current.y = e.clientY;
+      setPan((p) => clampPan(p.x + dx, p.y + dy, zoomRef.current));
+      poke();
+    },
+    [poke],
+  );
+  const onImgUp = useCallback((e: PointerEvent) => {
+    if (!panDragRef.current.on) return;
+    panDragRef.current.on = false;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+  }, []);
+
+  // the zoom minimap draws the grid thumbnail (a cache hit)
+  const zoomed = zoom > 1;
+  const shownId = visible?.asset.id;
+  useEffect(() => {
+    if (!zoomed || !shownId) return;
+    let alive = true;
+    loadThumb(shownId).then((u) => { if (alive) setMiniSrc(u); }).catch(() => {});
+    return () => { alive = false; };
+  }, [zoomed, shownId]);
+
+  // Live Photos play their motion only while browsing, unzoomed, and with the
+  // music off (the clip would need the media pipeline the radio is holding).
+  const motionOk = !!liveId && paused && !musicOn && !zoomed;
+  const motionOkRef = useRef(motionOk);
+  motionOkRef.current = motionOk;
+  useEffect(() => {
+    window.clearTimeout(motionFadeTimer.current);
+    setMotionVisible(false);
+    setMotionOn(motionOk && livePlayRef.current);
+  }, [liveId, motionOk]);
+  // fade the still back in over the clip, then drop the clip
+  const endMotion = useCallback(() => {
+    setMotionVisible(false);
+    window.clearTimeout(motionFadeTimer.current);
+    motionFadeTimer.current = window.setTimeout(() => setMotionOn(false), MOTION_FADE_MS);
+  }, []);
+  const replayMotion = useCallback(() => {
+    window.clearTimeout(motionFadeTimer.current);
+    setMotionVisible(false); // the still stays up until the clip's first frame decodes
+    setMotionOn(true);
+  }, []);
+  // The Live button toggles the persisted live-play preference AND applies it
+  // to the photo on screen.
+  const toggleLivePlay = useCallback(() => {
+    const next = !livePlayRef.current;
+    setLivePlay(next);
+    setLivePlayState(next);
+    if (next && motionOkRef.current) replayMotion();
+    else endMotion();
+    poke();
+  }, [replayMotion, endMotion, poke]);
+  // The still sits ON TOP of the motion clip and fades OUT to reveal it, so an
+  // opaque layer always covers the webOS hardware video plane (no black flash
+  // from the plane punching through a transparent layer). The still is a
+  // cached element, so its fade is set on it directly and undone when the
+  // frame changes.
+  const fadedRef = useRef<Still | null>(null);
+  useEffect(() => {
+    const prev = fadedRef.current;
+    if (prev !== visibleImg) {
+      // a new frame: the old still comes back opaque at once, and the new one
+      // starts opaque (motionVisible still describes the old photo's clip here)
+      for (const el of [prev, visibleImg]) {
+        if (el) {
+          el.style.transition = '';
+          el.style.opacity = '';
+        }
+      }
+      fadedRef.current = visibleImg;
+      return;
+    }
+    if (!visibleImg) return;
+    visibleImg.style.transition = `opacity ${MOTION_FADE_MS}ms ease-in-out`;
+    visibleImg.style.opacity = motionVisible ? '0' : '';
+  }, [visibleImg, motionVisible]);
 
   // own key listener (the shell's remote handler is disabled while we're up)
   useEffect(() => {
@@ -1042,13 +1476,67 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
 
       if (isBack(code)) {
         e.preventDefault();
-        onExit();
+        exit();
         return;
       }
+
+      // zoomed photo: arrows pan it and OK resets to fit
+      if (zoomRef.current > 1) {
+        if (code === Key.Enter || code === Key.PlayPause) {
+          e.preventDefault();
+          setZoom(1);
+          setPan({ x: 0, y: 0 });
+          return;
+        }
+        if (dir) {
+          e.preventDefault();
+          const z = zoomRef.current;
+          setPan((p) => {
+            const dx = dir === 'left' ? PAN_KEY_STEP : dir === 'right' ? -PAN_KEY_STEP : 0;
+            const dy = dir === 'up' ? PAN_KEY_STEP : dir === 'down' ? -PAN_KEY_STEP : 0;
+            return clampPan(p.x + dx, p.y + dy, z);
+          });
+          return;
+        }
+      }
+
       if (dir === 'up') {
         e.preventDefault();
         enterBar(); // raise + focus the options bar
-      } else if (dir === 'left') {
+        return;
+      }
+
+      // viewer on a video: OK plays/pauses the clip; left/right seek while it
+      // plays and step to the previous/next item while it's paused
+      const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
+      if (vid) {
+        if (code === Key.Enter || code === Key.PlayPause) {
+          e.preventDefault();
+          toggleVideo();
+        } else if (code === Key.Play) {
+          e.preventDefault();
+          vidHoldRef.current = false;
+          playEl(vid);
+        } else if (code === Key.Pause) {
+          e.preventDefault();
+          if (!vid.paused) toggleVideo();
+        } else if (code === Key.FastForward) {
+          e.preventDefault();
+          seek(SEEK_STEP);
+        } else if (code === Key.Rewind) {
+          e.preventDefault();
+          seek(-SEEK_STEP);
+        } else if (dir === 'left') {
+          e.preventDefault();
+          vid.paused ? advance(-1, true) : seek(-SEEK_STEP);
+        } else if (dir === 'right') {
+          e.preventDefault();
+          vid.paused ? advance(1, true) : seek(SEEK_STEP);
+        }
+        return;
+      }
+
+      if (dir === 'left') {
         e.preventDefault();
         advance(-1, true); // follows through once the previous frame loads
       } else if (dir === 'right') {
@@ -1056,26 +1544,98 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         advance(1, true); // follows through once the next frame loads
       } else if (code === Key.Enter || code === Key.PlayPause) {
         e.preventDefault();
-        setPaused((p) => {
-          const next = !p;
-          flashPill(next ? 'paused' : 'playing');
-          return next;
-        });
+        setPlaying(pausedRef.current);
+      } else if (code === Key.Play) {
+        e.preventDefault();
+        setPlaying(true);
+      } else if (code === Key.Pause) {
+        e.preventDefault();
+        setPlaying(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [advance, onExit, poke, flashPill, enterBar, leaveBar, focusBarBtn, focusGenreBtn, focusMusicBtn]);
+  }, [
+    advance,
+    exit,
+    poke,
+    setPlaying,
+    enterBar,
+    leaveBar,
+    focusBarBtn,
+    focusGenreBtn,
+    focusMusicBtn,
+    viewer,
+    toggleVideo,
+    playEl,
+    seek,
+  ]);
 
   if (!asset) return null;
 
   const cur = cache.current.get(i);
-  // spinner: current video still decoding, or a manual d-pad nav waiting on its
-  // target frame to load (the press is acknowledged, not dropped)
-  const buffering = (!!asset.isVideo && !(cur?.decoded)) || navPending;
+  const curVideo = viewer && asset.isVideo ? cur?.el : undefined;
+  const videoError = !!curVideo && !!cur?.error;
+  const loadFailed = viewer && failed === asset.id;
+  // spinner: nothing loaded yet for the current item, current video still
+  // decoding, or a manual d-pad nav waiting on its target frame to load (the
+  // press is acknowledged, not dropped)
+  const buffering =
+    navPending ||
+    (!cur && !loadFailed) ||
+    (!!asset.isVideo && !!cur && !cur.decoded && !cur.error);
   // key on the caption CONTENT so it only re-animates when the text changes
   // (consecutive shots from the same place/day won't re-trigger the animation)
   const metaKey = `${meta.loc ?? ''}|${meta.date}`;
+  const pct = progress.dur > 0 ? (progress.cur / progress.dur) * 100 : 0;
+  const bufferedPct = progress.dur > 0 ? Math.min(100, (progress.buffered / progress.dur) * 100) : 0;
+  // pointer arrows, viewer only: hidden at the ends and while zoomed (arrows pan)
+  const showArrows = viewer && !zoomed;
+
+  // Zoom minimap: the whole photo with a rectangle marking the visible region,
+  // computed from the contain-fit size, the current scale, and the pan (all in
+  // screen px).
+  let mini: {
+    w: number;
+    h: number;
+    box: { left: string; top: string; width: string; height: string };
+  } | null = null;
+  if (zoomed && visibleImg && miniSrc) {
+    const [iw, ih] = stillSize(visibleImg);
+    const imgAspect = iw > 0 && ih > 0 ? iw / ih : 1;
+    const Vw = window.innerWidth;
+    const Vh = window.innerHeight;
+    // contain-fit size at scale 1
+    let baseW: number, baseH: number;
+    if (imgAspect > Vw / Vh) {
+      baseW = Vw;
+      baseH = Vw / imgAspect;
+    } else {
+      baseH = Vh;
+      baseW = Vh * imgAspect;
+    }
+    const Sw = baseW * zoom;
+    const Sh = baseH * zoom;
+    const fx = Math.min(1, Vw / Sw);
+    const fy = Math.min(1, Vh / Sh);
+    // viewport center offset from image center (pan moves the image, so the
+    // view center moves opposite), normalized to the scaled image.
+    const cx = 0.5 - pan.x / Sw;
+    const cy = 0.5 - pan.y / Sh;
+    const bx = Math.max(0, Math.min(1 - fx, cx - fx / 2));
+    const by = Math.max(0, Math.min(1 - fy, cy - fy / 2));
+    const MINI_W = 220;
+    mini = {
+      w: MINI_W,
+      h: Math.round(MINI_W / imgAspect),
+      box: {
+        left: bx * 100 + '%',
+        top: by * 100 + '%',
+        width: fx * 100 + '%',
+        height: fy * 100 + '%',
+      },
+    };
+  }
 
   // Mount a frame's reused element (pre-decoded <img> or buffering <video>) as
   // the sole child of a persistent crossfade layer. The element is reparented,
@@ -1089,7 +1649,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       if (want) node.appendChild(want);
     }
     if (f?.el) {
-      if (on && !pausedRef.current) playEl(f.el);
+      if (on && wantPlay()) playEl(f.el);
       else f.el.pause();
     }
   };
@@ -1098,10 +1658,49 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // transform (animation ... both) would otherwise trap position:fixed inside
   // the content box, leaving the sidebar visible instead of a true fullscreen.
   return createPortal(
-    <div class={'wp-player ' + (overlay ? 'show-ui' : '')} onMouseMove={poke}>
+    <div
+      class={'wp-player ' + (overlay ? 'show-ui' : '')}
+      onMouseMove={poke}
+      onWheel={viewer ? onWheel : undefined}
+      onPointerDown={viewer ? onImgDown : undefined}
+      onPointerMove={viewer ? onImgMove : undefined}
+      onPointerUp={viewer ? onImgUp : undefined}
+      onPointerCancel={viewer ? onImgUp : undefined}
+    >
       {/* off-screen full-screen stage: stills are laid out + rastered here at
           display size before they're shown, then reparented into a frame layer */}
       <div class="wp-stage" ref={stageRef} />
+      {/* Live Photo motion, UNDER the current layer (same z-index, earlier in
+          the DOM). The clip is sized to the photo so the video plane only
+          punches through where the photo is, and the blurred fill the still
+          carries is copied here so the sides stay put while it plays. */}
+      {motionOn && liveId && visibleImg && (
+        <div class="wp-motion" style={backdropOf(visibleImg)}>
+          <video
+            ref={motionRef}
+            src={videoStreamUrl(liveId)}
+            style={containRect(visibleImg)}
+            autoPlay
+            muted
+            playsInline
+            // webOS fires `playing` at the first frame then can stall the
+            // short transcoded clip; kick playback on canplay and re-issue
+            // play() on any stall so it does not freeze on frame one.
+            onCanPlay={() => { void motionRef.current?.play().catch(() => {}); }}
+            // Reveal only once frames are actually advancing on the hardware
+            // plane. `playing` fires a beat early on webOS, so fading the still
+            // then punches a black frame mid-fade; waiting for currentTime > 0
+            // guarantees a real frame is on the plane before the still fades.
+            onTimeUpdate={() => {
+              if ((motionRef.current?.currentTime ?? 0) > 0) setMotionVisible(true);
+            }}
+            onWaiting={() => { void motionRef.current?.play().catch(() => {}); }}
+            onStalled={() => { void motionRef.current?.play().catch(() => {}); }}
+            onEnded={endMotion}
+            onError={() => setMotionOn(false)}
+          />
+        </div>
+      )}
       {(['a', 'b'] as const).map((slot) => {
         const f = layers[slot];
         const on = (slot === 'a') === showA; // this layer is the current one
@@ -1123,7 +1722,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
               on
                 ? { opacity: 1, zIndex: 1, transition: 'none' }
                 : fading
-                  ? { opacity: 0, zIndex: 2, transition: 'opacity 0.9s ease' }
+                  ? { opacity: 0, zIndex: 2, transition: `opacity ${fadeMs}ms ease` }
                   : { opacity: 1, zIndex: 2, transition: 'none' }
             }
             ref={(node) => mountLayer(node, f, on)}
@@ -1131,14 +1730,28 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         );
       })}
 
+      {(videoError || loadFailed) && (
+        <div class="wp-player-msg">
+          {videoError ? 'This video format is not supported on this TV.' : "This photo couldn't be loaded."}
+        </div>
+      )}
+
       {buffering && (
         <div class="wp-player-spin">
           <div class="fs-spinner" />
         </div>
       )}
 
+      {/* zoom minimap: whole photo + visible-region rectangle */}
+      {mini && miniSrc && (
+        <div class="fs-minimap" style={{ width: `${mini.w}px`, height: `${mini.h}px` }}>
+          <img src={miniSrc} />
+          <div class="fs-minimap-box" style={mini.box} />
+        </div>
+      )}
+
       {/* bottom-left caption, animates in fresh for each wallpaper (keyed by id) */}
-      {meta.date && (
+      {meta.date && !zoomed && (
         <div class="wp-player-meta" key={metaKey}>
           {meta.loc && <div class="wp-player-loc">{meta.loc}</div>}
           {meta.date && <div class="wp-player-date">{meta.date}</div>}
@@ -1146,6 +1759,41 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       )}
 
       <div class="wp-player-ui">
+        {showArrows && i > 0 && (
+          <button class="fs-arrow left" onClick={() => advance(-1, true)} title="Previous">
+            <Icon name="chevronLeft" size={48} />
+          </button>
+        )}
+        {showArrows && i < assets.length - 1 && (
+          <button class="fs-arrow right" onClick={() => advance(1, true)} title="Next">
+            <Icon name="chevronRight" size={48} />
+          </button>
+        )}
+
+        {/* video transport + seek bar, above the options bar */}
+        {curVideo && !videoError && (
+          <div class="wp-transport">
+            <button class="fs-btn round" onClick={toggleVideo}>
+              <Icon name={vidPaused ? 'play' : 'pause'} size={30} />
+            </button>
+            <span class="fs-time">{fmt(progress.cur)}</span>
+            <div
+              ref={seekRef}
+              class="fs-seek"
+              onPointerDown={onSeekDown}
+              onPointerMove={onSeekMove}
+              onPointerUp={onSeekUp}
+              onPointerCancel={onSeekUp}
+            >
+              <div class="fs-seek-buffer" style={{ width: `${bufferedPct}%` }} />
+              <div class="fs-seek-fill" style={{ width: `${pct}%` }}>
+                <span class="fs-seek-knob" />
+              </div>
+            </div>
+            <span class="fs-time">{fmt(progress.dur)}</span>
+          </div>
+        )}
+
         <div class={'wp-player-top' + (focusBar ? ' bar-focus' : '')} ref={barRef}>
           {pill !== 'none' && (
             <span class="wp-player-pill">
@@ -1153,7 +1801,30 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
               {pill === 'paused' ? 'Paused' : 'Playing'}
             </span>
           )}
-          {mode === 'photos' && <div
+          <button
+            class={'wp-text-btn' + (paused ? '' : ' active')}
+            onClick={() => { setPlaying(pausedRef.current); poke(); }}
+            title={paused ? 'Play slideshow' : 'Pause slideshow'}
+          >
+            <Icon name={paused ? 'play' : 'pause'} size={22} />
+            <span>{paused ? 'Play' : 'Pause'}</span>
+          </button>
+          {liveId && (
+            <button
+              class={'wp-icon-btn' + (livePlay ? ' active' : '')}
+              onClick={toggleLivePlay}
+              title={livePlay ? 'Live play on' : 'Live play off'}
+            >
+              <Icon name="live" size={22} />
+            </button>
+          )}
+          {curVideo && (
+            <button class="wp-text-btn" onClick={cycleQuality} title="Video quality">
+              <Icon name="hd" size={22} />
+              <span>{cur?.q === 'original' ? 'Original' : 'Transcoded'}</span>
+            </button>
+          )}
+          <div
             class="wp-music"
             onFocus={() => setMusicFocus(true)}
             onBlur={(e) => {
@@ -1188,41 +1859,39 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
             >
               <Icon name="music" size={22} />
             </button>
-          </div>}
-          {mode === 'photos' && (
-            <div class="wp-speed">
-              {SPEEDS.map((s) => (
-                <button
-                  key={s.ms}
-                  class={'wp-speed-btn' + (s.ms === intervalMs ? ' active' : '')}
-                  onClick={() => { setIntervalMs(s.ms); poke(); }}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          )}
+          </div>
+          <div class="wp-speed">
+            {SPEEDS.map((s) => (
+              <button
+                key={s.ms}
+                class={'wp-speed-btn' + (s.ms === intervalMs ? ' active' : '')}
+                onClick={() => { setIntervalMs(s.ms); poke(); }}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
           <button
-            class={'wp-icon-btn' + (mode === 'videos' ? ' wp-shuffle' : '') + (shuffle ? ' active' : '')}
+            class={'wp-icon-btn' + (shuffle ? ' active' : '')}
             onClick={() => { toggleShuffle(); poke(); }}
             title="Shuffle"
           >
             <Icon name="shuffle" size={22} />
           </button>
         </div>
-        {mode === 'photos' && <audio
+        <audio
           ref={audioRef}
           onError={nextStation}
           // a muted video can still steal audio focus on webOS and pause the
           // stream — resume it if music is meant to be on
           onPause={() => {
-            if (musicOnRef.current) {
+            if (musicWantRef.current) {
               window.setTimeout(() => {
-                if (musicOnRef.current) void audioRef.current?.play().catch(() => {});
+                if (musicWantRef.current) void audioRef.current?.play().catch(() => {});
               }, 400);
             }
           }}
-        />}
+        />
       </div>
     </div>,
     document.body,
@@ -1321,6 +1990,34 @@ async function applyBlurBackdrop(img: Still, id: string): Promise<void> {
   }
 }
 
+// the blurred fill a still carries (see applyBlurBackdrop), for an element
+// that has to show the same bars (the Live Photo motion layer)
+function backdropOf(img: Still): Record<string, string> {
+  return {
+    backgroundColor: '#000',
+    backgroundImage: img.style.backgroundImage,
+    backgroundRepeat: 'no-repeat',
+    backgroundPosition: img.style.backgroundPosition,
+    backgroundSize: img.style.backgroundSize,
+  };
+}
+
+// where a contain-fitted still sits on screen, in px
+function containRect(img: Still): Record<string, string> {
+  const [w, h] = stillSize(img);
+  const W = window.innerWidth || 1920;
+  const H = window.innerHeight || 1080;
+  const s = w > 0 && h > 0 ? Math.min(W / w, H / h) : 0;
+  const dw = s ? w * s : W;
+  const dh = s ? h * s : H;
+  return {
+    left: `${(W - dw) / 2}px`,
+    top: `${(H - dh) / 2}px`,
+    width: `${dw}px`,
+    height: `${dh}px`,
+  };
+}
+
 // Weighted shuffle (Efraimidis-Spirakis): each item gets key = rand^(1/weight),
 // sorted descending -> a uniform random permutation biased so heavier items tend
 // earlier / appear more (the same weighted-sampling trick Apple/Google Photos use
@@ -1336,9 +2033,22 @@ function weightedShuffle<T>(a: T[], weight: (item: T) => number): void {
   a.sort((x, y) => key.get(y)! - key.get(x)!);
 }
 
+function fmtPlace(r: { city?: string | null; state?: string | null; country?: string | null }): string | null {
+  const parts = [r.city, r.state, r.country].filter(Boolean) as string[];
+  const deduped = parts.filter((p, k) => p !== parts[k - 1]);
+  return deduped.length ? deduped.join(', ') : null;
+}
+
 function fmtDate(iso: string): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function fmt(s: number): string {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
 }

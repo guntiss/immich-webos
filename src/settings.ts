@@ -5,6 +5,7 @@ const LIVE_PLAY_KEY = 'immich.livePlay';
 const VIDEO_QUALITY_KEY = 'immich.videoQuality';
 const SORT_KEY = 'immich.sort.';
 const OVERLAY_HIDDEN_KEY = 'immich.overlayHidden';
+const VIEWER_MUSIC_KEY = 'immich.viewerMusic';
 
 export type VideoQuality = 'transcoded' | 'original';
 
@@ -21,7 +22,7 @@ export function setVideoQuality(q: VideoQuality): void {
 }
 
 // Whether Live Photos autoplay their motion clip. Off by default; the user
-// turns it on with OK/Enter on a Live Photo and it sticks across restarts.
+// turns it on with the viewer's Live button and it sticks across restarts.
 export function getLivePlay(): boolean {
   return localStorage.getItem(LIVE_PLAY_KEY) === '1';
 }
@@ -31,11 +32,11 @@ export function setLivePlay(on: boolean): void {
   else localStorage.removeItem(LIVE_PLAY_KEY);
 }
 
-// Whether the fullscreen viewer keeps its overlay (back, arrows, location,
-// quality) permanently hidden while browsing. Off by default (overlay auto-hides
-// after inactivity); the user turns it on from the grid header for a clean,
-// distraction-free view and it sticks across restarts. Navigation (arrows/back)
-// still works via the remote regardless.
+// Whether the fullscreen viewer keeps its overlay (options bar, arrows, video
+// controls) permanently hidden while browsing. Off by default (overlay
+// auto-hides after inactivity); the user turns it on from the grid header for a
+// clean, distraction-free view and it sticks across restarts. Navigation
+// still works via the remote regardless, and Up still raises the options bar.
 export function getOverlayHidden(): boolean {
   return localStorage.getItem(OVERLAY_HIDDEN_KEY) === '1';
 }
@@ -43,6 +44,18 @@ export function getOverlayHidden(): boolean {
 export function setOverlayHidden(on: boolean): void {
   if (on) localStorage.setItem(OVERLAY_HIDDEN_KEY, '1');
   else localStorage.removeItem(OVERLAY_HIDDEN_KEY);
+}
+
+// Whether the photo viewer plays background music. Off by default (the
+// Slideshow page always starts with it on); toggled from the viewer's options
+// bar and it sticks across restarts.
+export function getViewerMusic(): boolean {
+  return localStorage.getItem(VIEWER_MUSIC_KEY) === '1';
+}
+
+export function setViewerMusic(on: boolean): void {
+  if (on) localStorage.setItem(VIEWER_MUSIC_KEY, '1');
+  else localStorage.removeItem(VIEWER_MUSIC_KEY);
 }
 
 // Per-section sort direction. 'desc' (newest first) is the default everywhere;

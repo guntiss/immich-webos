@@ -68,3 +68,17 @@ function load(key: string): string[] {
     return [];
   }
 }
+
+// A SeenStore that forgets when the player closes: the photo viewer's
+// slideshow walks whatever grid it was opened from and needs no memory across
+// sessions.
+export function memorySeen(): SeenStore {
+  const ids = new Set<string>();
+  return {
+    has: (id) => ids.has(id),
+    add: (id) => void ids.add(id),
+    size: () => ids.size,
+    clear: () => ids.clear(),
+    flush() {},
+  };
+}
