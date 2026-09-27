@@ -1191,7 +1191,10 @@ export function WallpaperPlayer({
   }, []);
 
   // pause/resume: stop the timer (and in the slideshow the current video), or
-  // resume playback/rotation. The viewer's clip keeps its own play state.
+  // resume playback/rotation. The viewer's clip keeps its own play state. An
+  // item still loading (as when the player opens) is left to the show effect,
+  // which starts it once it's up: a still's dwell armed here would run out on
+  // a clip.
   useEffect(() => {
     const cur = cache.current.get(iRef.current);
     if (paused) {
@@ -1203,7 +1206,7 @@ export function WallpaperPlayer({
         vidHoldRef.current = false;
         playEl(cur.el);
       }
-    } else {
+    } else if (cur) {
       dwellOn(intervalRef.current);
     }
   }, [paused, scheduleNext, dwellOn, playEl]);
@@ -1211,7 +1214,8 @@ export function WallpaperPlayer({
   // changing the speed while a still is showing restarts its timer at the new rate
   useEffect(() => {
     if (paused) return;
-    if (!assets[iRef.current]?.isVideo) dwellOn(intervalMs);
+    const cur = cache.current.get(iRef.current);
+    if (cur && !cur.isVideo) dwellOn(intervalMs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs]);
 
