@@ -313,7 +313,10 @@ export function WallpaperPlayer({
   // once the user paused it (or it finished) so re-renders don't restart it.
   const vidHoldRef = useRef(false);
   const [vidPaused, setVidPaused] = useState(false);
-  const [progress, setProgress] = useState({ cur: 0, dur: 0, buffered: 0 });
+  // (loaded: the part of the clip buffered from the start, 0..1)
+  const [progress, setProgress] = useState({ cur: 0, dur: 0, loaded: 0 });
+  // the most of a clip's stream seen loaded, so the bar only ever grows
+  const loadedRef = useRef({ el: null as HTMLVideoElement | null, src: '', frac: 0 });
   const seekRef = useRef<HTMLDivElement>(null);
   // the seek line's fill and its run across the clip (see glide)
   const fillRef = useRef<HTMLDivElement>(null);
@@ -1013,7 +1016,7 @@ export function WallpaperPlayer({
     // a new item: its clip (if any) starts in play intent, at zero
     vidHoldRef.current = false;
     setVidPaused(false);
-    setProgress({ cur: 0, dur: 0, buffered: 0 });
+    setProgress({ cur: 0, dur: 0, loaded: 0 });
     fillRun.current?.anim.cancel();
     fillRun.current = null;
 
@@ -1421,7 +1424,14 @@ export function WallpaperPlayer({
     } catch {
       /* buffered not readable yet */
     }
-    setProgress({ cur: v.currentTime, dur: v.duration || 0, buffered });
+    // Never step the loaded part back: the range around the play-head can
+    // read shorter than a moment ago (a seek back, a time between ranges), and
+    // the bar jumped back with it. Starts over for another clip or stream.
+    const dur = v.duration || 0;
+    let seen = loadedRef.current;
+    if (seen.el !== v || seen.src !== v.src) seen = loadedRef.current = { el: v, src: v.src, frac: 0 };
+    if (dur > 0) seen.frac = Math.max(seen.frac, Math.min(1, buffered / dur));
+    setProgress({ cur: v.currentTime, dur, loaded: seen.frac });
     glide(v);
   }, [glide]);
   const updateProgress = useCallback(() => {
@@ -1995,7 +2005,7 @@ export function WallpaperPlayer({
   // (consecutive shots from the same place/day won't re-trigger the animation)
   const metaKey = `${meta.loc ?? ''}|${meta.date}`;
   const pct = progress.dur > 0 ? (progress.cur / progress.dur) * 100 : 0;
-  const bufferedPct = progress.dur > 0 ? Math.min(100, (progress.buffered / progress.dur) * 100) : 0;
+  const bufferedPct = progress.loaded * 100;
   // previous/next arrows: hidden at the viewer's ends (the show wraps) and
   // while zoomed (the d-pad pans)
   const showPrev = !zoomed && (!viewer || i > 0);
