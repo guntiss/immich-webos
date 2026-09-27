@@ -1689,8 +1689,70 @@ select {
   position: fixed;
   inset: 0;
   z-index: 60; /* above the fullscreen viewer (50) and sidebar */
-  background: #000;
   overflow: hidden;
+}
+/* the black backdrop and the frames on it. Faded in over the grid while a
+   photo grows out of its cell (opening), and out as it shrinks back (closing);
+   the hero carries the photo itself meanwhile. */
+.wp-scene {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0; /* its own stack: the frames (z1/z2) stay under the overlays */
+  background: #000;
+}
+/* in step with the hero: its animation starts with `hero-go` */
+.wp-player.opening .wp-scene {
+  opacity: 0;
+}
+.wp-player.opening.hero-go .wp-scene {
+  animation: wp-fade-in 320ms ease both;
+}
+.wp-player.closing.hero-go .wp-scene {
+  animation: wp-fade-out 320ms ease both;
+}
+@keyframes wp-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes wp-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+/* the photo growing out of / shrinking back into its grid cell; placed and
+   animated inline (see Hero in WallpaperPlayer) */
+.wp-hero {
+  position: absolute;
+  z-index: 3; /* over the scene; the spinner (later in the DOM) over it */
+  transform-origin: 0 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.wp-hero > img,
+.wp-hero > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* closing: only the shrinking photo and the fading scene */
+.wp-player.closing .wp-player-ui,
+.wp-player.closing .wp-player-meta,
+.wp-player.closing .wp-player-msg,
+.wp-player.closing .wp-player-spin,
+.wp-player.closing .wp-edge-progress,
+.wp-player.closing .fs-minimap {
+  visibility: hidden;
 }
 /* Two persistent crossfade layers. opacity/z-index/transition are set INLINE
    per layer in the render map: the current frame snaps opaque underneath while
@@ -1903,6 +1965,10 @@ select {
 }
 .wp-player.show-ui .wp-player-ui {
   opacity: 1;
+}
+/* growing: the controls fade in once the photo has landed */
+.wp-player.opening .wp-player-ui {
+  opacity: 0;
 }
 .wp-player-ui > * {
   pointer-events: auto;

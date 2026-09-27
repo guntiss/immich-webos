@@ -39,6 +39,7 @@ interface Viewer {
   seen: SeenStore; // what its slideshow has shown, for shuffle
   canShuffle: boolean; // opened from an album: offers Shuffle
   placeOf?: PlaceOf; // opened from a grid: numbers photos across all of it
+  from?: { rect: DOMRect; src: string | null }; // the cell it grows out of
 }
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
@@ -197,11 +198,30 @@ export function Home({ onLogout }: { onLogout: () => void }) {
 
   // Shuffle is only offered inside an album; the all-photos views (timeline,
   // favorites, search) browse in their own order.
+  // The viewer grows out of the opened photo's cell and shrinks back into the
+  // cell of the photo it closes on: where that cell is (and its thumbnail),
+  // and for the way back, bringing the cell into view first (instantly, under
+  // the viewer).
+  const cellOf = (id: string | undefined) =>
+    id ? rootRef.current?.querySelector<HTMLElement>(`[data-asset-id="${id}"]`) ?? null : null;
+  const originOf = (id: string | undefined) => {
+    const el = cellOf(id);
+    return el ? { rect: el.getBoundingClientRect(), src: el.querySelector('img')?.src ?? null } : undefined;
+  };
+  const locateCell = useCallback((id: string) => {
+    const el = cellOf(id);
+    if (!el) return null;
+    focus(el, true);
+    return el.getBoundingClientRect();
+  }, []);
+
   const openViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: false, placeOf });
+    const from = originOf(assets[index]?.id);
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: false, placeOf, from });
   }, []);
   const openAlbumViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf });
+    const from = originOf(assets[index]?.id);
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf, from });
   }, []);
 
   // update the live asset list in the viewer as the grid loads more buckets
@@ -349,6 +369,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           seen={viewer.seen}
           canShuffle={viewer.canShuffle}
           placeOf={viewer.placeOf}
+          from={viewer.from}
+          locate={locateCell}
           onExit={closeViewer}
           onNearEnd={handleNearEnd}
         />

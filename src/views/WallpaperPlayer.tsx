@@ -54,6 +54,11 @@ interface Props {
   // viewer opened from a grid: a photo's place in all of it, for the "12 / 340"
   // by its play button (else its place in the list the viewer walks)
   placeOf?: PlaceOf;
+  // viewer opened from a grid: the cell it opened from (where on screen, and
+  // its thumbnail), to grow out of; and `locate`, which brings a photo's cell
+  // into view and says where it is, to shrink back into on the way out
+  from?: { rect: Box; src: string | null };
+  locate?: (id: string) => Box | null;
 }
 
 // The d-pad drives one group of controls at a time, stepped through with
@@ -71,6 +76,9 @@ const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
 const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this long idle
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
+const HERO_MS = 320; // a photo growing out of / shrinking back into its grid cell
+const HERO_EASE = 'cubic-bezier(0.2, 0, 0, 1)';
+const HERO_FADE_MS = 200; // the grown thumbnail giving way to the real photo
 const SPEEDS = [
   { label: '3s', ms: 3000 },
   { label: '5s', ms: 5000 },
@@ -100,6 +108,40 @@ const SCREEN_PX =
 
 // a still's display element: a decoded <img>, or a canvas holding its bitmap
 type Still = HTMLImageElement | HTMLCanvasElement;
+
+// a screen rectangle, px
+interface Box {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+// the photo growing out of / shrinking back into its grid cell: laid out at
+// `box`, it animates (`go`) from the `from` transform to the `to` one
+interface Hero {
+  n: number; // bumped per animation, to start each once
+  box: Box;
+  from: string;
+  to: string;
+  src?: string; // a thumbnail to show...
+  el?: Still; // ...or the still itself (closing)
+  go?: boolean;
+  fade?: boolean; // opened: giving way to the real photo
+}
+// where something of aspect `ar` (width / height) sits fitted whole on screen
+function fitBox(ar: number): Box {
+  const W = window.innerWidth || 1920;
+  const H = window.innerHeight || 1080;
+  const wide = !(ar > 0) || ar > W / H;
+  const w = !(ar > 0) ? W : wide ? W : H * ar;
+  const h = !(ar > 0) ? H : wide ? W / ar : H;
+  return { left: (W - w) / 2, top: (H - h) / 2, width: w, height: h };
+}
+// the transform (about the top-left corner) that lays an element placed at
+// `box` over `at`
+function boxTransform(at: Box, box: Box): string {
+  return `translate(${at.left - box.left}px, ${at.top - box.top}px) scale(${at.width / box.width}, ${at.height / box.height})`;
+}
 const stillSize = (s: Still): [number, number] =>
   s instanceof HTMLCanvasElement ? [s.width, s.height] : [s.naturalWidth, s.naturalHeight];
 // pull a still off the stage / frame layer, freeing a canvas's pixels now
@@ -167,6 +209,8 @@ export function WallpaperPlayer({
   canShuffle = true,
   seen,
   placeOf,
+  from,
+  locate,
 }: Props) {
   const viewer = mode === 'viewer';
   const [i, setI] = useState(() => Math.max(0, Math.min(startIndex, assetsProp.length - 1)));
@@ -263,6 +307,22 @@ export function WallpaperPlayer({
   zoomRef.current = zoom;
   const panDragRef = useRef({ on: false, x: 0, y: 0 });
   const [miniSrc, setMiniSrc] = useState<string | null>(null);
+
+  // ---- viewer: growing out of / shrinking back into the grid cell ----
+  // The hero is a copy of the photo laid over everything, animated between its
+  // grid cell and its place on screen. Opening, the cell's thumbnail grows to
+  // full size while the scene (backdrop + frames) fades in over the grid, then
+  // fades away onto the real photo once that's up. Closing, the photo itself
+  // (a video's thumbnail: the video plane can't move) shrinks back into its
+  // cell, which `locate` has scrolled into view, while the scene fades out.
+  const [hero, setHero] = useState<Hero | null>(() => {
+    if (!viewer || !from?.src) return null;
+    const box = fitBox(from.rect.width / from.rect.height);
+    return { n: 1, box, from: boxTransform(from.rect, box), to: 'none', src: from.src };
+  });
+  const [phase, setPhase] = useState<'opening' | 'open' | 'closing'>(hero ? 'opening' : 'open');
+  const closingRef = useRef(false);
+  const closeRef = useRef<() => void>(() => {}); // closing: the onExit call, once shrunk
   // Live Photo: motionOn keeps the clip mounted; motionVisible fades the still
   // on top of it out. The clip mounts hidden under the still and is revealed
   // only once it has a decoded frame (no black buffering flash), and the still
@@ -1185,6 +1245,7 @@ export function WallpaperPlayer({
   // Not while zoomed, where a drag pans.
   const onPhotoClick = useCallback(
     (e: MouseEvent) => {
+      if (closingRef.current) return;
       if ((e.target as HTMLElement).closest('.wp-player-ui, .wp-edge-progress')) return;
       if (assets[iRef.current]?.isVideo || zoomRef.current > 1) return;
       setPlaying(pausedRef.current);
@@ -1193,9 +1254,57 @@ export function WallpaperPlayer({
   );
 
   const exit = useCallback(() => {
-    onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
-  }, [onExit, assets]);
+    if (closingRef.current) return;
+    const shown = shownAssetRef.current ?? assets[iRef.current] ?? null;
+    const to = viewer && shown && locate ? locate(shown.id) : null;
+    if (!shown || !to) return onExit(shown);
+    // shrink back into the grid cell (see `hero`), then close
+    closingRef.current = true;
+    window.clearTimeout(advanceTimer.current);
+    pausedRef.current = true; // no advancing mid-close
+    setMotionOn(false);
+    const cur = showARef.current ? layersRef.current.a : layersRef.current.b;
+    const on = cur && cur.asset.id === shown.id ? cur : null;
+    const still = on?.img;
+    const [w, h] = still
+      ? stillSize(still)
+      : on?.el?.videoWidth
+        ? [on.el.videoWidth, on.el.videoHeight]
+        : [to.width, to.height];
+    const box = fitBox(w / h);
+    const go = (src?: string) => {
+      closeRef.current = () => onExit(shown);
+      setHero((prev) => ({ n: (prev?.n ?? 0) + 1, box, from: 'none', to: boxTransform(to, box), el: still, src }));
+      setPhase('closing');
+    };
+    if (still) go();
+    else loadThumb(shown.id).then(go, () => onExit(shown));
+  }, [onExit, assets, viewer, locate]);
   exitRef.current = exit;
+
+  // Run the hero (and the scene's fade, keyed on `go`) toward its end. Effects
+  // run after the frame is painted, so its start is already on screen. Once
+  // there: opened, the grown thumbnail stays until the real photo is up
+  // (below); closed, the viewer goes.
+  const heroN = hero?.n;
+  useEffect(() => {
+    if (!heroN) return;
+    setHero((h) => (h && h.n === heroN ? { ...h, go: true } : h));
+    const t = window.setTimeout(() => {
+      if (closingRef.current) closeRef.current();
+      else setPhase('open');
+    }, HERO_MS + 32);
+    return () => window.clearTimeout(t);
+  }, [heroN]);
+  // a closing video leaves the screen once the thumbnail covers it
+  useEffect(() => {
+    if (phase !== 'closing') return;
+    const cur = showARef.current ? layersRef.current.a : layersRef.current.b;
+    if (cur?.el) {
+      cur.el.pause();
+      cur.el.remove();
+    }
+  }, [phase]);
 
   // cancel a pending fade kick-off when the player closes
   useEffect(() => () => window.cancelAnimationFrame(fadeRaf.current), []);
@@ -1211,6 +1320,17 @@ export function WallpaperPlayer({
   const visible = showA ? layers.a : layers.b;
   const visibleImg = viewer ? visible?.img ?? null : null;
   const shownId = visible?.asset.id;
+
+  // opened: the grown thumbnail fades away onto the real photo once that's up
+  // (or a message that it can't be shown)
+  const settled = !!visible || (!!asset && (failed === asset.id || !!cache.current.get(i)?.error));
+  const heroUp = !!hero;
+  useEffect(() => {
+    if (phase !== 'open' || !heroUp || !settled) return;
+    setHero((h) => h && { ...h, fade: true });
+    const t = window.setTimeout(() => setHero(null), HERO_FADE_MS);
+    return () => window.clearTimeout(t);
+  }, [phase, heroUp, settled]);
   const visibleVid = viewer ? visible?.el ?? null : null;
   const liveId = viewer && visible && !visible.asset.isVideo ? visible.asset.livePhotoVideoId ?? null : null;
 
@@ -1375,7 +1495,7 @@ export function WallpaperPlayer({
   // toward the pointer.
   const onWheel = useCallback(
     (e: WheelEvent) => {
-      if (!visibleImg || !pausedRef.current) return;
+      if (!visibleImg || !pausedRef.current || closingRef.current) return;
       e.preventDefault();
       poke();
       zoomBy(e.deltaY < 0, { x: e.clientX, y: e.clientY });
@@ -1534,6 +1654,10 @@ export function WallpaperPlayer({
   // own key listener (the shell's remote handler is disabled while we're up)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (closingRef.current) {
+        e.preventDefault();
+        return;
+      }
       const code = e.keyCode;
       const dir = dirFromKey(code);
       // viewer on a video: OK and the media keys drive the clip
@@ -1768,7 +1892,7 @@ export function WallpaperPlayer({
   // never recreated, so it never re-decodes/re-downloads or flashes black. Only
   // the visible layer's video plays; the outgoing one freezes as it fades.
   const mountLayer = (node: HTMLDivElement | null, f: Frame | null, on: boolean) => {
-    if (!node) return;
+    if (!node || closingRef.current) return; // closing: the still is the hero's
     const want = (f && (f.el || f.img)) || null;
     if (node.firstChild !== want) {
       while (node.firstChild) node.removeChild(node.firstChild); // detach prior element (still cached)
@@ -1780,12 +1904,27 @@ export function WallpaperPlayer({
     }
   };
 
+  // The closing still, moved into the hero as it is: cover-fitted to the box
+  // (its photo's shape) and without the blurred fill it carries for the sides.
+  const mountHero = (node: HTMLDivElement | null, el?: Still) => {
+    if (!node || !el || el.parentElement === node) return;
+    el.style.transform = '';
+    el.style.transition = '';
+    el.style.opacity = '';
+    el.style.backgroundImage = 'none';
+    el.style.objectFit = 'cover';
+    node.appendChild(el);
+  };
+
   // Portal to <body>: rendered inside the shell's .view-enter, whose lingering
   // transform (animation ... both) would otherwise trap position:fixed inside
   // the content box, leaving the sidebar visible instead of a true fullscreen.
   return createPortal(
     <div
-      class={'wp-player group-' + group + (overlay ? ' show-ui' : '')}
+      class={
+        'wp-player group-' + group + (overlay ? ' show-ui' : '') +
+        (phase !== 'open' ? ' ' + phase : '') + (hero?.go ? ' hero-go' : '')
+      }
       onMouseMove={poke}
       onClick={viewer ? onPhotoClick : undefined}
       onWheel={viewer ? onWheel : undefined}
@@ -1797,6 +1936,8 @@ export function WallpaperPlayer({
       {/* off-screen full-screen stage: stills are laid out + rastered here at
           display size before they're shown, then reparented into a frame layer */}
       <div class="wp-stage" ref={stageRef} />
+      {/* the scene: backdrop + frames, faded in and out around the hero */}
+      <div class="wp-scene">
       {/* Live Photo motion, UNDER the current layer (same z-index, earlier in
           the DOM). The clip is sized to the photo so the video plane only
           punches through where the photo is, and the blurred fill the still
@@ -1856,6 +1997,7 @@ export function WallpaperPlayer({
           />
         );
       })}
+      </div>
 
       {(videoError || loadFailed) && (
         <div class="wp-player-msg">
@@ -1863,7 +2005,31 @@ export function WallpaperPlayer({
         </div>
       )}
 
-      {(buffering || warming) && (
+      {/* the photo growing out of / shrinking back into its grid cell */}
+      {hero && (
+        <div
+          class="wp-hero"
+          style={{
+            left: `${hero.box.left}px`,
+            top: `${hero.box.top}px`,
+            width: `${hero.box.width}px`,
+            height: `${hero.box.height}px`,
+            transform: hero.go ? hero.to : hero.from,
+            opacity: hero.fade ? 0 : 1,
+            transition: hero.fade
+              ? `opacity ${HERO_FADE_MS}ms ease`
+              : hero.go
+                ? `transform ${HERO_MS}ms ${HERO_EASE}`
+                : 'none',
+          }}
+          ref={(node) => mountHero(node, hero.el)}
+        >
+          {hero.src && <img src={hero.src} />}
+        </div>
+      )}
+
+      {/* while growing, the hero is the placeholder */}
+      {(buffering || warming) && phase !== 'opening' && (
         <div class={'wp-player-spin' + (warming ? ' cover' : '')}>
           <div class="fs-spinner" />
         </div>
@@ -2123,17 +2289,8 @@ function backdropOf(img: Still): Record<string, string> {
 // where a contain-fitted still sits on screen, in px
 function containRect(img: Still): Record<string, string> {
   const [w, h] = stillSize(img);
-  const W = window.innerWidth || 1920;
-  const H = window.innerHeight || 1080;
-  const s = w > 0 && h > 0 ? Math.min(W / w, H / h) : 0;
-  const dw = s ? w * s : W;
-  const dh = s ? h * s : H;
-  return {
-    left: `${(W - dw) / 2}px`,
-    top: `${(H - dh) / 2}px`,
-    width: `${dw}px`,
-    height: `${dh}px`,
-  };
+  const b = fitBox(h > 0 ? w / h : 0);
+  return { left: `${b.left}px`, top: `${b.top}px`, width: `${b.width}px`, height: `${b.height}px` };
 }
 
 // Weighted shuffle (Efraimidis-Spirakis): each item gets key = rand^(1/weight),
