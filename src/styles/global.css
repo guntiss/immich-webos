@@ -1932,8 +1932,9 @@ select {
   top: 0;
   bottom: 0;
 }
+/* opaque: the grey the old see-through buffer showed over a dark frame */
 .wp-edge-buffer {
-  background: rgba(255, 255, 255, 0.45);
+  background: #969696;
 }
 /* a clip's fill spans the track and slides in from the left (moved, not
    resized, so it glides on the compositor, see glide), the knob at its end */
