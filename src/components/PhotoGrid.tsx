@@ -234,48 +234,44 @@ const BucketSection = memo(function BucketSection({
 
   // Pack consecutive day-groups into shared rows when they fit. A shared row
   // never fills the width, so justify() leaves it at rowH: lay each day out at
-  // that height (gaps and separators included) and merge a day only if
-  //   1. the whole row still fits the width
-  //   2. the previous day's label ends LABEL_GAP before this day's starts
-  //   3. this day's label ends inside the row
-  // Days of one or two narrow thumbnails (a videos-only view) stay apart.
+  // that height (gaps and separators included). A day narrower than its label
+  // (one portrait video) widens the separator after it so the next day starts
+  // LABEL_GAP past the label. A day joins the row only if
+  //   1. the whole row, separators included, still fits the width
+  //   2. this day's label ends inside the row
   const days = assets ? groupByDay(assets) : [];
-  const units: Asset[][] = [];
-  let cur: Asset[] = [];
+  const units: Unit[] = [];
+  let cur: Unit | null = null;
   let curW = 0; // px from cur's left edge to where its next item would start
   let lastLeft = 0; // left edge of the latest day label in cur
   let lastText = '';
   for (const day of days) {
     const dayW = day.assets.reduce((s, a) => s + (a.ratio > 0 ? a.ratio : 1) * rowH + GAP, 0);
     const text = formatDay(day.key);
-    const left = curW + DAY_SEP + GAP;
-    if (
-      cur.length &&
-      left + dayW - GAP <= width &&
-      left - lastLeft >= labelWidth(lastText) + LABEL_GAP &&
-      left + labelWidth(text) <= width
-    ) {
-      cur.push(...day.assets);
+    const pad = Math.max(0, lastLeft + labelWidth(lastText) + LABEL_GAP - (curW + DAY_SEP + GAP));
+    const left = curW + DAY_SEP + GAP + pad;
+    if (cur && left + dayW - GAP <= width && left + labelWidth(text) <= width) {
+      cur.assets.push(...day.assets);
+      cur.seps[day.key] = DAY_SEP + pad;
       curW = left + dayW;
       lastLeft = left;
     } else {
-      if (cur.length) units.push(cur);
-      cur = day.assets.slice();
+      cur = { assets: day.assets.slice(), seps: {} };
+      units.push(cur);
       curW = dayW;
       lastLeft = 0;
     }
     lastText = text;
   }
-  if (cur.length) units.push(cur);
 
   let bucketIdx = 0;
 
   return (
     <section ref={ref} class="bucket">
       {assets ? (
-        units.map((unitAssets, ui) => {
-          const nSeps = Math.max(0, new Set(unitAssets.map((a) => dayKey(a.createdAt))).size - 1);
-          const effWidth = width - nSeps * (DAY_SEP + GAP);
+        units.map(({ assets: unitAssets, seps }, ui) => {
+          let effWidth = width;
+          for (const k in seps) effWidth -= seps[k] + GAP;
           const rows = justify(unitAssets, effWidth, rowH, GAP);
           let rowOffset = 0;
           let prevDk: string | undefined; // persists across rows — no duplicate labels
@@ -287,8 +283,9 @@ const BucketSection = memo(function BucketSection({
               const dk = dayKey(a.createdAt);
               const isNewDay = dk !== prevDk;
               if (isNewDay && j > 0) {
-                rowChildren.push(<div class="day-sep" key={`sep${j}`} />);
-                cumX += DAY_SEP + GAP;
+                const sep = seps[dk] ?? DAY_SEP;
+                rowChildren.push(<div class="day-sep" key={`sep${j}`} style={{ flexBasis: `${sep}px` }} />);
+                cumX += sep + GAP;
               }
               if (isNewDay) {
                 labels.push({ left: cumX, text: formatDay(dk) });
@@ -345,6 +342,12 @@ const BucketSection = memo(function BucketSection({
     </section>
   );
 });
+
+// Days that share one row (or a single day, which may span several).
+interface Unit {
+  assets: Asset[];
+  seps: Record<string, number>; // day key -> px of the separator before it
+}
 
 interface DayGroup {
   key: string; // YYYY-MM-DD
