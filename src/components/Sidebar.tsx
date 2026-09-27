@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import { Icon } from './Icon';
 import { IconName } from './icons';
 import { ImmichLogo } from './ImmichLogo';
 import { isWebOS, checkForUpdate } from '../api/localRelay';
+import { GENRES, useMusic, playGenre, stopMusic, toggleMusic, nextStation } from '../api/music';
 import pkg from '../../package.json';
 
 const APP_VERSION = 'v' + pkg.version;
@@ -29,6 +30,8 @@ interface Props {
   userName?: string;
   onNavigate: (r: Route) => void;
   onLogout: () => void;
+  // register a back handler with the shell; returns true when it consumed Back
+  backRef: { current: (() => boolean) | null };
 }
 
 // Single floating rail card. Collapsed it's a 76px icon strip; open it widens
@@ -47,7 +50,7 @@ interface Props {
 // focus order. Collapsed, they remain pointer-clickable (magic remote).
 type UpdateStatus = 'idle' | 'checking' | 'upToDate' | 'installing' | 'error';
 
-export function Sidebar({ open, active, userName, onNavigate, onLogout }: Props) {
+export function Sidebar({ open, active, userName, onNavigate, onLogout, backRef }: Props) {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
   const [updateLabel, setUpdateLabel] = useState(APP_VERSION);
 
@@ -97,6 +100,44 @@ export function Sidebar({ open, active, userName, onNavigate, onLogout }: Props)
     };
   }, []);
 
+  // Music: the row shows what's playing; OK opens its menu of genres (plus
+  // next station and off) right under it. Collapsed, a click on the note just
+  // turns the music on or off.
+  const music = useMusic();
+  const [musicMenu, setMusicMenu] = useState(false);
+  const musicBtn = useRef<HTMLButtonElement>(null);
+  const musicMenuRef = useRef<HTMLDivElement>(null);
+  const openMusicMenu = () => {
+    setMusicMenu(true);
+    setTimeout(() => musicMenuRef.current?.querySelector<HTMLElement>('.selected')?.focus(), 0);
+  };
+  const closeMusicMenu = () => {
+    setMusicMenu(false);
+    setTimeout(() => musicBtn.current?.focus(), 0);
+  };
+  // the menu folds away with the rail
+  useEffect(() => {
+    if (!open) setMusicMenu(false);
+  }, [open]);
+  // Back inside the menu closes it instead of leaving the app
+  useEffect(() => {
+    backRef.current = () => {
+      if (!musicMenu) return false;
+      closeMusicMenu();
+      return true;
+    };
+    return () => {
+      backRef.current = null;
+    };
+  }, [backRef, musicMenu]);
+  const genreLabel = GENRES.find((g) => g.tag === music.genre)?.label ?? music.genre;
+  const station = music.stations[music.idx];
+  const musicStatus = !music.on
+    ? 'Off'
+    : genreLabel +
+      ' · ' +
+      (music.failed ? 'No station found' : station && !music.loading ? station.name : 'Tuning in…');
+
   const priming = warm !== 'done';
   const railOpen = open || warm === 'prime';
   // d-pad focusability only when genuinely open (not during the warm-up prime).
@@ -135,6 +176,56 @@ export function Sidebar({ open, active, userName, onNavigate, onLogout }: Props)
         </nav>
 
         <div class="rail-foot">
+          <button
+            ref={musicBtn}
+            {...navAttrs}
+            class={'rail-item rail-music focusable' + (music.on ? ' on' : '')}
+            onClick={() => (!open ? toggleMusic() : musicMenu ? closeMusicMenu() : openMusicMenu())}
+          >
+            <Icon name="music" size={26} />
+            <span class="rail-label rail-music-text">
+              <span>Music</span>
+              <span class="rail-music-status">{musicStatus}</span>
+            </span>
+          </button>
+          {musicMenu && (
+            <div class="rail-music-menu" ref={musicMenuRef}>
+              {music.on && music.stations.length > 1 && (
+                <button {...navAttrs} class="rail-item rail-sub focusable" onClick={nextStation}>
+                  <Icon name="skipNext" size={22} />
+                  <span class="rail-label">Next station</span>
+                </button>
+              )}
+              {GENRES.map((g) => {
+                const sel = music.on && g.tag === music.genre;
+                return (
+                  <button
+                    key={g.tag}
+                    {...navAttrs}
+                    class={'rail-item rail-sub focusable' + (sel ? ' selected' : '')}
+                    onClick={() => {
+                      playGenre(g.tag);
+                      closeMusicMenu();
+                    }}
+                  >
+                    <Icon name="check" size={22} class="rail-tick" />
+                    <span class="rail-label">{g.label}</span>
+                  </button>
+                );
+              })}
+              <button
+                {...navAttrs}
+                class={'rail-item rail-sub focusable' + (!music.on ? ' selected' : '')}
+                onClick={() => {
+                  stopMusic();
+                  closeMusicMenu();
+                }}
+              >
+                <Icon name="check" size={22} class="rail-tick" />
+                <span class="rail-label">Off</span>
+              </button>
+            </div>
+          )}
           <div class="rail-item user">
             <Icon name="account" size={26} />
             <span class="rail-label">{userName || 'Account'}</span>

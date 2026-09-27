@@ -5,7 +5,6 @@ const LIVE_PLAY_KEY = 'immich.livePlay';
 const VIDEO_QUALITY_KEY = 'immich.videoQuality';
 const SORT_KEY = 'immich.sort.';
 const OVERLAY_HIDDEN_KEY = 'immich.overlayHidden';
-const VIEWER_MUSIC_KEY = 'immich.viewerMusic';
 
 export type VideoQuality = 'transcoded' | 'original';
 
@@ -44,18 +43,6 @@ export function getOverlayHidden(): boolean {
 export function setOverlayHidden(on: boolean): void {
   if (on) localStorage.setItem(OVERLAY_HIDDEN_KEY, '1');
   else localStorage.removeItem(OVERLAY_HIDDEN_KEY);
-}
-
-// Whether the photo viewer plays background music. Off by default (the
-// Slideshow page always starts with it on); toggled from the viewer's options
-// bar and it sticks across restarts.
-export function getViewerMusic(): boolean {
-  return localStorage.getItem(VIEWER_MUSIC_KEY) === '1';
-}
-
-export function setViewerMusic(on: boolean): void {
-  if (on) localStorage.setItem(VIEWER_MUSIC_KEY, '1');
-  else localStorage.removeItem(VIEWER_MUSIC_KEY);
 }
 
 // Per-section sort direction. 'desc' (newest first) is the default everywhere;

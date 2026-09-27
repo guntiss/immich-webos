@@ -701,6 +701,50 @@ select {
 .rail-item--ok {
   color: #4ade80;
 }
+/* Music row: the label is two lines, "Music" over what's playing. The note
+   takes the accent while music plays, so the collapsed strip shows it too. */
+.rail-music.on svg {
+  color: var(--immich-dark-primary);
+}
+.rail-music-text {
+  display: flex;
+  flex-direction: column;
+  width: 190px;
+  line-height: 1.2;
+}
+.rail-music-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 15px;
+  color: var(--muted);
+}
+/* its menu, right under it: slimmer rows, the icon column holds a tick on the
+   current choice (or the next-station glyph) and labels line up with the
+   rail's (26 + 22 + 20 = 68px, as 24 + 26 + 18 above) */
+.rail-music-menu {
+  display: flex;
+  flex-direction: column;
+}
+.rail-sub {
+  height: 44px;
+  padding-left: 26px;
+  font-size: 18px;
+  color: var(--muted);
+}
+.rail-sub > * + * {
+  margin-left: 20px;
+}
+.rail-sub.selected,
+.rail-sub.focusable:focus {
+  color: var(--fg);
+}
+.rail-tick {
+  visibility: hidden;
+}
+.rail-sub.selected .rail-tick {
+  visibility: visible;
+  color: var(--immich-dark-primary);
+}
 /* Labels: present in the DOM always (so no reflow on open), but faded out while
    collapsed and faded in on open. Opacity is GPU-cheap and the text is clipped
    by the card anyway. */
@@ -1833,28 +1877,6 @@ select {
   justify-content: flex-end;
   gap: 16px;
   padding: 28px 32px;
-}
-/* background-music control, sits left of the speed selector */
-.wp-music {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-/* genre selector floats above the music button, only while the bar is focused */
-.wp-genres {
-  position: absolute;
-  bottom: calc(100% + 12px);
-  right: 0;
-}
-.wp-music-name {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.85);
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
 }
 .wp-icon-btn {
   display: inline-flex;

@@ -31,6 +31,7 @@ import { memorySeen, SeenStore } from './wallpaperSeen';
 import { useRemote } from '../nav/useRemote';
 import { setRoot, focusables, focus, elementInViewport, focusVisibleContent } from '../nav/focus';
 import { exitApp } from '../nav/exit';
+import { startMusic, stopMusic } from '../api/music';
 
 interface Viewer {
   assets: Asset[];
@@ -53,6 +54,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const [wpFullscreen, setWpFullscreen] = useState(false);
   // set by the Wallpaper page to a handler that pops its own internal stack
   const wallpaperBack = useRef<(() => boolean) | null>(null);
+  // set by the sidebar: closes its Music menu
+  const sidebarBack = useRef<(() => boolean) | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   // The content focusable (thumbnail) that had focus when the sidebar was
   // opened, so collapsing the sidebar restores it instead of jumping to the top
@@ -63,6 +66,12 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // Albums-list scroll + focus to restore when returning from an opened album.
   const albumsRestore = useRef<AlbumsRestore | null>(null);
   const user = getUser();
+
+  // background music plays from the moment the app opens (Lofi) until sign-out
+  useEffect(() => {
+    startMusic();
+    return stopMusic;
+  }, []);
 
   // Per-section sort direction, seeded from the persisted preference. Held in
   // state so flipping it re-renders: the view wrapper's key includes the active
@@ -266,12 +275,15 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // Back hierarchy:
   //  viewer        -> close to grid (the viewer handles its own Back; this is
   //                   the fallback if it ever bubbles up)
+  //  music menu    -> close it
   //  album open    -> back to album list
   //  sidebar open  -> quit via webOS's native exit
   //  grid (closed) -> open sidebar, focus the active tab
   const onBack = useCallback(() => {
     if (viewer) {
       closeViewer(viewer.assets[viewer.index] ?? null);
+    } else if (sidebarOpen && sidebarBack.current?.()) {
+      // the sidebar consumed Back (closed its Music menu)
     } else if (album) {
       setAlbum(null);
     } else if (sidebarOpen) {
@@ -339,6 +351,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
         userName={user?.name}
         onNavigate={navigate}
         onLogout={requestLogout}
+        backRef={sidebarBack}
       />
       {confirmLogout && (
         <ConfirmDialog

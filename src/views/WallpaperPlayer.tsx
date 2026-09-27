@@ -12,7 +12,7 @@ import {
   getAssetPixels,
 } from '../api/client';
 import { Key, isBack, dirFromKey } from '../nav/keys';
-import { fetchStations, Station } from '../api/radio';
+import { holdMusic, useMusic } from '../api/music';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
 import {
@@ -22,8 +22,6 @@ import {
   setVideoQuality,
   VideoQuality,
   getOverlayHidden,
-  getViewerMusic,
-  setViewerMusic,
 } from '../settings';
 import { aimAtFaces } from './faceCrop';
 import { SeenStore } from './wallpaperSeen';
@@ -31,14 +29,13 @@ import { SeenStore } from './wallpaperSeen';
 interface Props {
   assets: Asset[];
   // 'photos': the Slideshow page's show — shuffled, auto-advancing, landscape
-  // stills face-cropped to fill the screen, background music on.
+  // stills face-cropped to fill the screen.
   // 'viewer': the photo viewer opened from a grid — starts PAUSED on
   // `startIndex` in list order and only runs as a slideshow once Play is
   // pressed. Every photo is shown whole over a blurred fill, photos zoom with
   // the scroll wheel, Live Photos play their motion, and videos play with their
-  // own sound and a seek bar. The music is let go while a video is up: webOS
-  // has one hardware media pipeline, and a radio stream and a video can't
-  // decode at the same time (the video plane just goes black).
+  // own sound and a seek bar. The app's background music is held off while a
+  // video is up (see holdMusic).
   mode: 'photos' | 'viewer';
   startIndex?: number;
   // `shown` is the item on screen at exit, so the grid can refocus it
@@ -65,13 +62,6 @@ const SPEEDS = [
   { label: '15s', ms: 15000 },
 ];
 const DEFAULT_MS = SPEEDS[0].ms; // dwell per still (5s)
-const GENRES = [
-  { label: 'Ambient', tag: 'ambient' },
-  { label: 'Lofi', tag: 'lofi' },
-  { label: 'Jazz', tag: 'jazz' },
-  { label: 'Classical', tag: 'classical' },
-];
-const DEFAULT_GENRE = 'lofi'; // music starts on with this genre (photos mode)
 const WINDOW = 2; // stills prefetched ahead (each holds a decoded bitmap in TV RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
 const SEEK_STEP = 10; // seconds
@@ -203,9 +193,6 @@ export function WallpaperPlayer({
   const focusBarRef = useRef(false);
   focusBarRef.current = focusBar;
   const barRef = useRef<HTMLDivElement>(null);
-  // true while d-pad focus sits on the music button or one of its genre pills;
-  // gates the genre popover so it only shows when the music control is focused
-  const [musicFocus, setMusicFocus] = useState(false);
   // transient play/pause feedback pill, shown briefly on each toggle
   const [pill, setPill] = useState<'none' | 'paused' | 'playing'>('none');
   const pillTimer = useRef<number | undefined>(undefined);
@@ -231,15 +218,8 @@ export function WallpaperPlayer({
   const [intervalMs, setIntervalMs] = useState(DEFAULT_MS);
   const intervalRef = useRef(DEFAULT_MS);
   intervalRef.current = intervalMs;
-  // background music (Radio Browser internet-radio streams): on by default in
-  // the slideshow; the viewer remembers what it was last set to (off at first)
-  const [musicOn, setMusicOn] = useState(() => (viewer ? getViewerMusic() : true));
-  const [genre, setGenre] = useState(DEFAULT_GENRE);
-  const [stations, setStations] = useState<Station[]>([]);
-  const [stIdx, setStIdx] = useState(0);
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const musicOnRef = useRef(musicOn);
-  musicOnRef.current = musicOn;
+  // the app's background music, steered from the sidebar
+  const musicOn = useMusic().on;
   const [, setTick] = useState(0);
   const bump = useCallback(() => setTick((t) => t + 1), []);
 
@@ -1029,28 +1009,13 @@ export function WallpaperPlayer({
     hideTimer.current = window.setTimeout(() => setOverlay(false), viewer ? VIEWER_HIDE_MS : HIDE_MS);
   }, [overlayHidden, viewer]);
 
-  // Walk a live list of buttons, wrapping at both ends, moving focus by `delta`.
-  const walk = (btns: HTMLButtonElement[], delta: number) => {
+  // Move d-pad focus among the option-bar buttons by `delta` (live query — the
+  // button set changes with the item shown). Wraps at both ends.
+  const focusBarBtn = useCallback((delta: number) => {
+    const btns = Array.from(barRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? []);
     if (!btns.length) return;
     const cur = btns.indexOf(document.activeElement as HTMLButtonElement);
-    const next = cur < 0 ? 0 : (cur + delta + btns.length) % btns.length;
-    btns[next].focus();
-  };
-  // bottom-row buttons (genre pills live in a popover ABOVE, walked separately)
-  const barBtns = () =>
-    Array.from(barRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? []).filter(
-      (b) => !b.closest('.wp-genres'),
-    );
-  const genreBtns = () =>
-    Array.from(barRef.current?.querySelectorAll<HTMLButtonElement>('.wp-genres button') ?? []);
-  // Move d-pad focus among the option-bar buttons (live query — the button set
-  // changes with the item shown and whether music is on). Wraps at both ends.
-  const focusBarBtn = useCallback((delta: number) => walk(barBtns(), delta), []);
-  const focusGenreBtn = useCallback((delta: number) => walk(genreBtns(), delta), []);
-  const focusMusicBtn = useCallback(() => {
-    barRef.current
-      ?.querySelector<HTMLButtonElement>('button[title="Background music"]')
-      ?.focus();
+    btns[cur < 0 ? 0 : (cur + delta + btns.length) % btns.length].focus();
   }, []);
 
   const enterBar = useCallback(() => {
@@ -1094,66 +1059,11 @@ export function WallpaperPlayer({
     onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
   }, [onExit, assets]);
 
-  // --- background music ---
-  // The viewer lets go of the stream while a video is the current item.
+  // The viewer's videos play with their own sound, so the background music is
+  // held off while one is the current item (the slideshow keeps them muted).
   const musicHeld = viewer && !!asset?.isVideo;
-  const musicWantRef = useRef(false);
-  musicWantRef.current = musicOn && !musicHeld;
+  useEffect(() => (musicHeld ? holdMusic() : undefined), [musicHeld]);
 
-  const loadGenre = useCallback(async (tag: string) => {
-    const st = await fetchStations(tag);
-    setStations(st);
-    setStIdx(0);
-  }, []);
-
-  const toggleMusic = useCallback(async () => {
-    poke();
-    const next = !musicOn;
-    setMusicOn(next);
-    if (viewer) setViewerMusic(next);
-    if (next && stations.length === 0) await loadGenre(genre);
-  }, [musicOn, stations.length, genre, loadGenre, poke, viewer]);
-
-  const selectGenre = useCallback(
-    (tag: string) => {
-      poke();
-      if (tag === genre) return;
-      setGenre(tag);
-      if (musicOn) void loadGenre(tag);
-    },
-    [genre, musicOn, loadGenre, poke],
-  );
-
-  const nextStation = useCallback(() => {
-    poke();
-    setStIdx((n) => (stations.length ? (n + 1) % stations.length : 0));
-  }, [stations.length, poke]);
-
-  // drive the <audio> element from music state / selected station
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-    if (musicOn && !musicHeld && stations[stIdx]) {
-      if (a.src !== stations[stIdx].url) a.src = stations[stIdx].url;
-      void a.play().catch(() => {});
-    } else if (musicHeld && a.getAttribute('src')) {
-      // unload rather than pause, so the video gets the media pipeline to itself
-      a.pause();
-      a.removeAttribute('src');
-      a.load();
-    } else {
-      a.pause();
-    }
-  }, [musicOn, musicHeld, stIdx, stations]);
-
-  // music starts on: fetch the default genre's stations as the player opens
-  useEffect(() => {
-    if (musicOnRef.current) void loadGenre(DEFAULT_GENRE);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // stop music when the player closes
-  useEffect(() => () => audioRef.current?.pause(), []);
   // cancel a pending fade kick-off when the player closes
   useEffect(() => () => window.cancelAnimationFrame(fadeRaf.current), []);
 
@@ -1431,28 +1341,10 @@ export function WallpaperPlayer({
       poke();
       const dir = dirFromKey(code);
 
-      // options bar has focus. Two rows: the bottom button row, and the genre
-      // popover ABOVE the music button. Up from the music button climbs into the
-      // genres; Down drops back; Down again (from the bottom row) exits the bar.
+      // options bar has focus: Left/Right walk its buttons, Down or Back
+      // leaves it
       if (focusBarRef.current) {
         const active = document.activeElement as HTMLElement | null;
-        const inGenres = !!active?.closest('.wp-genres');
-        if (inGenres) {
-          if (dir === 'left') {
-            e.preventDefault();
-            focusGenreBtn(-1);
-          } else if (dir === 'right') {
-            e.preventDefault();
-            focusGenreBtn(1);
-          } else if (dir === 'down' || isBack(code)) {
-            e.preventDefault();
-            focusMusicBtn();
-          } else if (code === Key.Enter) {
-            e.preventDefault();
-            active?.click();
-          }
-          return;
-        }
         if (dir === 'left') {
           e.preventDefault();
           focusBarBtn(-1);
@@ -1460,10 +1352,7 @@ export function WallpaperPlayer({
           e.preventDefault();
           focusBarBtn(1);
         } else if (dir === 'up') {
-          // on any music control (toggle or next-station) with the genre popover
-          // open: climb into it
           e.preventDefault();
-          if (active?.closest('.wp-music') && genreBtns().length) focusGenreBtn(1);
         } else if (dir === 'down' || isBack(code)) {
           e.preventDefault();
           leaveBar();
@@ -1563,8 +1452,6 @@ export function WallpaperPlayer({
     enterBar,
     leaveBar,
     focusBarBtn,
-    focusGenreBtn,
-    focusMusicBtn,
     viewer,
     toggleVideo,
     playEl,
@@ -1824,42 +1711,6 @@ export function WallpaperPlayer({
               <span>{cur?.q === 'original' ? 'Original' : 'Transcoded'}</span>
             </button>
           )}
-          <div
-            class="wp-music"
-            onFocus={() => setMusicFocus(true)}
-            onBlur={(e) => {
-              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMusicFocus(false);
-            }}
-          >
-            {musicOn && musicFocus && (
-              <div class="wp-genres wp-speed">
-                {GENRES.map((g) => (
-                  <button
-                    key={g.tag}
-                    class={'wp-speed-btn' + (g.tag === genre ? ' active' : '')}
-                    onClick={() => selectGenre(g.tag)}
-                  >
-                    {g.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            {musicOn && stations[stIdx] && (
-              <span class="wp-music-name">{stations[stIdx].name}</span>
-            )}
-            {musicOn && stations.length > 1 && (
-              <button class="wp-icon-btn" onClick={nextStation} title="Next station">
-                <Icon name="skipNext" size={22} />
-              </button>
-            )}
-            <button
-              class={'wp-icon-btn' + (musicOn ? ' active' : '')}
-              onClick={toggleMusic}
-              title="Background music"
-            >
-              <Icon name="music" size={22} />
-            </button>
-          </div>
           <div class="wp-speed">
             {SPEEDS.map((s) => (
               <button
@@ -1879,19 +1730,6 @@ export function WallpaperPlayer({
             <Icon name="shuffle" size={22} />
           </button>
         </div>
-        <audio
-          ref={audioRef}
-          onError={nextStation}
-          // a muted video can still steal audio focus on webOS and pause the
-          // stream — resume it if music is meant to be on
-          onPause={() => {
-            if (musicWantRef.current) {
-              window.setTimeout(() => {
-                if (musicWantRef.current) void audioRef.current?.play().catch(() => {});
-              }, 400);
-            }
-          }}
-        />
       </div>
     </div>,
     document.body,
