@@ -1550,11 +1550,16 @@ export function WallpaperPlayer({
         !vid && (code === Key.Enter || code === Key.PlayPause || code === Key.Play || code === Key.Pause);
       if (!(g === 'nav' && zoomRef.current <= 1 && (step || showKey))) poke();
 
-      // Back drops a picked group back to previous/next first, then closes
+      // Back drops a picked group back to previous/next first, then a zoomed
+      // photo back to fit, then closes
       if (isBack(code)) {
         e.preventDefault();
         if (g !== 'nav') selectGroup('nav');
-        else exit();
+        else if (zoomRef.current > 1) {
+          zoomRef.current = 1;
+          setZoom(1);
+          setPan({ x: 0, y: 0 });
+        } else exit();
         return;
       }
 
