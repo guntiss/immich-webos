@@ -1858,6 +1858,30 @@ select {
     opacity: 1;
   }
 }
+/* always-on video progress line along the bottom edge */
+.wp-edge-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.25);
+  pointer-events: none;
+  z-index: 3; /* above both crossfade layers (current z1, outgoing z2) */
+}
+.wp-edge-progress-buffer,
+.wp-edge-progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+}
+.wp-edge-progress-buffer {
+  background: rgba(255, 255, 255, 0.45);
+}
+.wp-edge-progress-fill {
+  background: var(--immich-dark-primary);
+}
 .wp-player-ui {
   position: absolute;
   inset: 0;

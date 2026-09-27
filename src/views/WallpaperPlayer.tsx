@@ -1734,6 +1734,15 @@ export function WallpaperPlayer({
         </div>
       )}
 
+      {/* thin progress line on the bottom edge, shown the whole time a video
+          plays, not only while the transport is up */}
+      {curVideo && !videoError && !warming && (
+        <div class="wp-edge-progress">
+          <div class="wp-edge-progress-buffer" style={{ width: `${bufferedPct}%` }} />
+          <div class="wp-edge-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
       <div class="wp-player-ui">
         {showArrows && i > 0 && (
           <button class="fs-arrow left" onClick={() => advance(-1, true)} title="Previous">
