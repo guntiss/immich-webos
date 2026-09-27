@@ -62,6 +62,7 @@ interface Props {
 // change meaning on their own), 'seek' (Left/Right jump the clip, the video
 // transport above the bar; viewer videos only) and 'bar' (Left/Right walk the
 // options bar along the bottom edge). The selected group's controls are ringed.
+// Up past the top group, 'nav', puts the controls away.
 type Group = 'nav' | 'seek' | 'bar';
 
 const HIDE_MS = 3000;
@@ -1524,7 +1525,8 @@ export function WallpaperPlayer({
       }
 
       // Down/Up step through the groups as they sit on screen: nav (the side
-      // arrows), seek (the transport, videos only), bar (the bottom edge)
+      // arrows), seek (the transport, videos only), bar (the bottom edge).
+      // Up from nav hides the controls; any other key brings them back.
       if (dir === 'down') {
         e.preventDefault();
         selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
@@ -1533,6 +1535,10 @@ export function WallpaperPlayer({
       if (dir === 'up') {
         e.preventDefault();
         if (g === 'seek') selectGroup('nav');
+        else {
+          window.clearTimeout(hideTimer.current); // undo the poke() above
+          setOverlay(false);
+        }
         return;
       }
 
