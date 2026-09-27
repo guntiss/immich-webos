@@ -11,6 +11,7 @@
 // or another app.
 import { useEffect, useState } from 'preact/hooks';
 import { fetchStations, Station } from './radio';
+import { digitalSoundOutput, watchSoundOutput } from './soundOutput';
 
 export const GENRES = [
   { label: 'Lofi', tag: 'lofi' },
@@ -50,6 +51,7 @@ let fadeTimer = 0;
 let fetchToken = 0; // only the latest genre fetch lands
 let errors = 0; // stations in a row that failed to play
 let unlockArmed = false;
+let heardPcm = false; // non-AAC music has played since a clip last took over
 
 function set(patch: Partial<MusicState>): void {
   state = { ...state, ...patch };
@@ -115,6 +117,7 @@ function ensureAudio(): void {
   const a = document.createElement('audio');
   a.addEventListener('playing', () => {
     errors = 0;
+    if (!state.stations[state.idx]?.aac) heardPcm = true;
   });
   // a dead stream: move on to the genre's next station, giving up once every
   // one of them has failed in a row
@@ -133,6 +136,7 @@ function ensureAudio(): void {
     }, 400);
   });
   document.addEventListener('visibilitychange', sync);
+  watchSoundOutput();
   document.body.appendChild(a);
   audio = a;
 }
@@ -141,8 +145,13 @@ async function load(tag: string): Promise<void> {
   const token = ++fetchToken;
   errors = 0;
   set({ stations: [], idx: 0, loading: true, failed: false });
-  const stations = await fetchStations(tag);
+  let stations = await fetchStations(tag);
   if (token !== fetchToken) return;
+  // A digital link to a soundbar or receiver carries the radio's MP3 as PCM
+  // but AAC as it is, like a clip's own audio: an AAC station keeps it on one
+  // format, so the receiver doesn't go quiet re-syncing whenever a clip
+  // starts or stops (see takeClipWarmup).
+  if (digitalSoundOutput() && stations.some((s) => s.aac)) stations = stations.filter((s) => s.aac);
   set({ stations, idx: 0, loading: false, failed: !stations.length });
 }
 
@@ -208,6 +217,18 @@ export function duckMusic(): { faded: Promise<void>; release: () => void } {
     }, UNDUCK_DELAY_MS);
   };
   return { faded: silent, release };
+}
+
+// Whether a clip with sound, about to play, should warm the audio output up
+// first. A digital link to a soundbar or receiver (ARC/eARC, optical) sends
+// MP3 music as PCM but a clip's own AAC as it is, and the receiver goes quiet
+// for about a second re-syncing to the new format, swallowing the start of the
+// clip. Only needed when non-AAC music has played since the last clip (the
+// digital link normally gets AAC stations, see load).
+export function takeClipWarmup(): boolean {
+  const need = heardPcm && digitalSoundOutput();
+  heardPcm = false;
+  return need;
 }
 
 export function useMusic(): MusicState {

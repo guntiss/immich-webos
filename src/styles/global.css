@@ -1819,6 +1819,11 @@ select {
   align-items: center;
   justify-content: center;
 }
+/* hides a clip warming the audio output up (opaque, so the video plane
+   under it stays covered) */
+.wp-player-spin.cover {
+  background: #000;
+}
 /* bottom-left date + location caption, animates in per wallpaper */
 .wp-player-meta {
   position: absolute;

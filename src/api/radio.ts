@@ -7,6 +7,7 @@
 export interface Station {
   name: string;
   url: string; // resolved stream URL, playable directly in <audio>
+  aac: boolean; // AAC/AAC+ stream (else MP3, OGG, ...)
 }
 
 const HOSTS = [
@@ -20,14 +21,23 @@ const HOSTS = [
 export async function fetchStations(tag = 'ambient'): Promise<Station[]> {
   const q =
     `/json/stations/search?tag=${encodeURIComponent(tag)}` +
-    '&hidebroken=true&order=clickcount&reverse=true&limit=40';
+    '&hidebroken=true&order=clickcount&reverse=true&limit=100';
   for (const host of HOSTS) {
     try {
       const res = await fetch(host + q);
       if (!res.ok) continue;
-      const data = (await res.json()) as Array<{ name: string; url: string; url_resolved?: string }>;
+      const data = (await res.json()) as Array<{
+        name: string;
+        url: string;
+        url_resolved?: string;
+        codec?: string;
+      }>;
       const stations = data
-        .map((d) => ({ name: d.name?.trim() || 'Unknown', url: d.url_resolved || d.url }))
+        .map((d) => ({
+          name: d.name?.trim() || 'Unknown',
+          url: d.url_resolved || d.url,
+          aac: /^AAC/i.test(d.codec || ''),
+        }))
         .filter((s) => !!s.url);
       if (stations.length) return stations;
     } catch {

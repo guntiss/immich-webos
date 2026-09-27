@@ -12,7 +12,7 @@ import {
   getAssetPixels,
 } from '../api/client';
 import { Key, isBack, dirFromKey } from '../nav/keys';
-import { duckMusic, useMusic } from '../api/music';
+import { duckMusic, takeClipWarmup, useMusic } from '../api/music';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
 import {
@@ -69,6 +69,7 @@ const ZOOM_STEP = 1.2; // scale multiplier per scroll-wheel tick
 const MAX_ZOOM = 6;
 const PAN_KEY_STEP = 120; // px the d-pad nudges a zoomed photo
 const MOTION_FADE_MS = 600; // Live Photo still fades out/in over this long
+const WARMUP_MS = 1200; // a soundbar re-syncing to a new audio format misses about this much
 
 // Stills are decoded off the main thread into an ImageBitmap and shown on a
 // canvas where the TV supports it (see loadBitmapStill). Chromium 81+
@@ -274,9 +275,11 @@ export function WallpaperPlayer({
   const exitRef = useRef<() => void>(() => {});
 
   // The background music can't play alongside a clip on webOS (see duckMusic),
-  // so each clip ducks it before playing and hands it back when it pauses, ends
-  // or goes. The viewer ducks it even before LOADING a clip (loadDuck): loading
-  // one, an original especially, can already cut the music off mid-song.
+  // so each clip ducks it before playing and hands it back once it ends or is
+  // left. Not when it's paused: the music coming back would take the TV's one
+  // player away from the clip and blank its frame. The viewer ducks it even
+  // before LOADING a clip (loadDuck): loading one, an original especially, can
+  // already cut the music off mid-song.
   const musicDucks = useRef(new Map<HTMLVideoElement, ReturnType<typeof duckMusic>>());
   const unduck = useCallback((el: HTMLVideoElement) => {
     musicDucks.current.get(el)?.release();
@@ -304,6 +307,40 @@ export function WallpaperPlayer({
     [releaseLoadDuck],
   );
 
+  // Warm the audio output up before a clip is heard (see takeClipWarmup): play
+  // it muted under a black cover for WARMUP_MS once it's actually playing
+  // (looping, so a short clip can't end meanwhile), then go back to where it
+  // started and unmute. Pausing or leaving it cuts the warm-up short.
+  const [warming, setWarming] = useState(false);
+  const warmUp = useCallback((el: HTMLVideoElement) => {
+    const at = el.currentTime;
+    const loop = el.loop;
+    el.muted = true;
+    el.loop = true;
+    setWarming(true);
+    let timer = 0;
+    let over = false;
+    const done = () => {
+      if (over) return;
+      over = true;
+      window.clearTimeout(timer);
+      window.clearTimeout(guard);
+      el.removeEventListener('playing', arm);
+      el.removeEventListener('pause', done);
+      el.muted = false;
+      el.loop = loop;
+      el.currentTime = at;
+      setWarming(false);
+    };
+    const arm = () => {
+      timer = window.setTimeout(done, WARMUP_MS);
+    };
+    // never leave the cover up on a clip that doesn't start
+    const guard = window.setTimeout(done, VIDEO_STALL_MS);
+    el.addEventListener('playing', arm, { once: true });
+    el.addEventListener('pause', done);
+  }, []);
+
   // play() once the music has faded out, with an autoplay-policy fallback: an
   // UNMUTED play can be rejected (desktop dev without a fresh gesture) —
   // degrade that clip to muted rather than letting it sit black until the
@@ -317,9 +354,9 @@ export function WallpaperPlayer({
     const mine = duck;
     void mine.faded.then(() => {
       if (musicDucks.current.get(el) !== mine) return; // handed back meanwhile
-      // moved on or paused during the fade: it never started, so no 'pause'
-      // event will hand the music back
-      if (cache.current.get(iRef.current)?.el !== el || !wantPlay()) return unduck(el);
+      if (cache.current.get(iRef.current)?.el !== el) return unduck(el); // moved on
+      if (!wantPlay()) return; // paused during the fade: stays paused, music down
+      if (el.paused && !el.muted && takeClipWarmup()) warmUp(el);
       void el.play().catch(() => {
         if (!el.muted) {
           el.muted = true;
@@ -328,7 +365,7 @@ export function WallpaperPlayer({
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unduck]);
+  }, [unduck, warmUp]);
 
   // Whether the current video should be playing: in the slideshow it follows
   // the show's pause; in the viewer the clip keeps its own play state.
@@ -523,7 +560,6 @@ export function WallpaperPlayer({
           else vidHoldRef.current = true;
         });
         el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
-        el.addEventListener('pause', () => unduck(el));
         el.addEventListener('ended', () => unduck(el));
         el.addEventListener('error', () => {
           if (e.gone) return;
@@ -927,6 +963,7 @@ export function WallpaperPlayer({
       const out = cache.current.get(i)?.el;
       if (out) {
         out.pause();
+        unduck(out);
         out.preload = 'metadata';
       }
     };
@@ -1675,8 +1712,8 @@ export function WallpaperPlayer({
         </div>
       )}
 
-      {buffering && (
-        <div class="wp-player-spin">
+      {(buffering || warming) && (
+        <div class={'wp-player-spin' + (warming ? ' cover' : '')}>
           <div class="fs-spinner" />
         </div>
       )}
@@ -1710,7 +1747,7 @@ export function WallpaperPlayer({
         )}
 
         {/* video transport + seek bar, above the options bar */}
-        {curVideo && !videoError && (
+        {curVideo && !videoError && !warming && (
           <div class="wp-transport">
             <button class="fs-btn round" onClick={toggleVideo}>
               <Icon name={vidPaused ? 'play' : 'pause'} size={30} />
