@@ -9,7 +9,7 @@ import { reportError } from './ErrorBoundary';
 import { EmptyState } from './EmptyState';
 
 const DAY_SEP = 5; // px gap inserted between day-groups on a shared row
-const MIN_LABEL_WIDTH = 230; // min px between consecutive day labels (prevents collision)
+const LABEL_GAP = 24; // min px between one day label's end and the next one's start
 
 // Where an asset sits in the whole grid (1-based) and how many items the grid
 // holds, for the viewer's "12 / 340"; null when it isn't in the grid.
@@ -232,46 +232,41 @@ const BucketSection = memo(function BucketSection({
     return () => bucketObserver.unobserve(el);
   }, [tb, ensureBucket]);
 
-  // Pack consecutive day-groups into shared rows when they fit.
-  // A day is merged into the current unit only if:
-  //   1. combined ratioSum fits in one row at rowH (with separator pixels deducted)
-  //   2. pixel gap between the last label and the new label >= MIN_LABEL_WIDTH
+  // Pack consecutive day-groups into shared rows when they fit. A shared row
+  // never fills the width, so justify() leaves it at rowH: lay each day out at
+  // that height (gaps and separators included) and merge a day only if
+  //   1. the whole row still fits the width
+  //   2. the previous day's label ends LABEL_GAP before this day's starts
+  //   3. this day's label ends inside the row
+  // Days of one or two narrow thumbnails (a videos-only view) stay apart.
   const days = assets ? groupByDay(assets) : [];
   const units: Asset[][] = [];
-  if (days.length) {
-    let cur: Asset[] = [];
-    let curRatioSum = 0;
-    let lastLabelRatioSum = 0; // ratio offset of the most-recent day label
-    let curSeps = 0;           // separator divs already in cur
-    for (const day of days) {
-      const dayRatioSum = day.assets.reduce((s, a) => s + Math.max(a.ratio, 0.1), 0);
-      if (cur.length === 0) {
-        cur = day.assets.slice();
-        curRatioSum = dayRatioSum;
-        lastLabelRatioSum = 0;
-        curSeps = 0;
-      } else {
-        // effWidth: container minus the separator divs that will be rendered
-        const effWidth = width - (curSeps + 1) * (DAY_SEP + GAP);
-        const mergedTotal = curRatioSum + dayRatioSum;
-        // pixel distance between the last label and this new label in the merged row
-        const labelGap = (curRatioSum - lastLabelRatioSum) * effWidth / mergedTotal;
-        if (mergedTotal <= effWidth / rowH && labelGap >= MIN_LABEL_WIDTH) {
-          lastLabelRatioSum = curRatioSum;
-          cur.push(...day.assets);
-          curRatioSum = mergedTotal;
-          curSeps++;
-        } else {
-          units.push(cur);
-          cur = day.assets.slice();
-          curRatioSum = dayRatioSum;
-          lastLabelRatioSum = 0;
-          curSeps = 0;
-        }
-      }
+  let cur: Asset[] = [];
+  let curW = 0; // px from cur's left edge to where its next item would start
+  let lastLeft = 0; // left edge of the latest day label in cur
+  let lastText = '';
+  for (const day of days) {
+    const dayW = day.assets.reduce((s, a) => s + (a.ratio > 0 ? a.ratio : 1) * rowH + GAP, 0);
+    const text = formatDay(day.key);
+    const left = curW + DAY_SEP + GAP;
+    if (
+      cur.length &&
+      left + dayW - GAP <= width &&
+      left - lastLeft >= labelWidth(lastText) + LABEL_GAP &&
+      left + labelWidth(text) <= width
+    ) {
+      cur.push(...day.assets);
+      curW = left + dayW;
+      lastLeft = left;
+    } else {
+      if (cur.length) units.push(cur);
+      cur = day.assets.slice();
+      curW = dayW;
+      lastLeft = 0;
     }
-    if (cur.length) units.push(cur);
+    lastText = text;
   }
+  if (cur.length) units.push(cur);
 
   let bucketIdx = 0;
 
@@ -392,6 +387,17 @@ function formatDay(key: string): string {
     month: 'long',
     day: 'numeric',
   });
+}
+
+// Rendered width of a day label in .day-label's font. Measured, not guessed:
+// "Wed, September 30, 2026" alone is 241px, and other locales run longer.
+// Before Inter loads the fallback measures ~13px short; LABEL_GAP covers that.
+let labelCtx: CanvasRenderingContext2D | null = null;
+function labelWidth(text: string): number {
+  if (!labelCtx) labelCtx = document.createElement('canvas').getContext('2d');
+  if (!labelCtx) return text.length * 11;
+  labelCtx.font = "600 19px Inter, -apple-system, 'Helvetica Neue', Arial, sans-serif";
+  return labelCtx.measureText(text).width;
 }
 
 function formatBucket(iso: string): string {
