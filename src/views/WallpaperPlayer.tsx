@@ -15,6 +15,7 @@ import { Key, isBack, dirFromKey } from '../nav/keys';
 import { duckMusic, takeClipWarmup, useMusic } from '../api/music';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
+import type { PlaceOf } from '../components/PhotoGrid';
 import {
   getLivePlay,
   setLivePlay,
@@ -31,7 +32,7 @@ interface Props {
   // 'photos': the Slideshow page's show — shuffled, auto-advancing, landscape
   // stills face-cropped to fill the screen.
   // 'viewer': the photo viewer opened from a grid — starts PAUSED on
-  // `startIndex` in list order and only runs as a slideshow once Slideshow is
+  // `startIndex` in list order and only runs as a slideshow once play is
   // pressed. Every photo is shown whole over a blurred fill, photos zoom with
   // the scroll wheel, Live Photos play their motion, and videos play with their
   // own sound and a seek bar. Any clip playing, in either mode, fades the
@@ -50,6 +51,9 @@ interface Props {
   canShuffle?: boolean;
   // what this source has already shown: shuffle skips these
   seen: SeenStore;
+  // viewer opened from a grid: a photo's place in all of it, for the "12 / 340"
+  // by its play button (else its place in the list the viewer walks)
+  placeOf?: PlaceOf;
 }
 
 // The d-pad drives one group of controls at a time, stepped through with
@@ -152,6 +156,7 @@ export function WallpaperPlayer({
   onShuffleChange,
   canShuffle = true,
   seen,
+  placeOf,
 }: Props) {
   const viewer = mode === 'viewer';
   const [i, setI] = useState(() => Math.max(0, Math.min(startIndex, assetsProp.length - 1)));
@@ -1589,6 +1594,10 @@ export function WallpaperPlayer({
   // while zoomed (the d-pad pans)
   const showPrev = !zoomed && (!viewer || i > 0);
   const showNext = !zoomed && (!viewer || i < assets.length - 1);
+  // viewer on a photo: the slideshow's play/pause and the photo's number take
+  // the place of a clip's transport
+  const photoPlace =
+    viewer && !asset.isVideo ? placeOf?.(asset.id) ?? { n: i + 1, total: assets.length } : null;
 
   // Zoom minimap: the whole photo with a rectangle marking the visible region,
   // computed from the contain-fit size, the current scale, and the pan (all in
@@ -1807,15 +1816,38 @@ export function WallpaperPlayer({
           </div>
         )}
 
+        {/* photo transport: the slideshow's play/pause right where a clip's
+            is (an invisible back-10s button holds its place), + photo number */}
+        {photoPlace && (
+          <div class="wp-transport">
+            <span class="fs-btn round ghost" aria-hidden="true">
+              <Icon name="rewind10" size={30} />
+            </span>
+            <button
+              class="fs-btn round"
+              onClick={() => { setPlaying(pausedRef.current); poke(); }}
+              title={paused ? 'Start slideshow' : 'Pause slideshow'}
+            >
+              <Icon name={paused ? 'play' : 'pause'} size={30} />
+            </button>
+            <span class="fs-time">
+              {photoPlace.n.toLocaleString()} / {photoPlace.total.toLocaleString()}
+            </span>
+          </div>
+        )}
+
         <div class="wp-player-top" ref={barRef}>
-          <button
-            class={'wp-text-btn' + (paused ? '' : ' active')}
-            onClick={() => { setPlaying(pausedRef.current); poke(); }}
-            title={paused ? 'Start slideshow' : 'Pause slideshow'}
-          >
-            <Icon name={paused ? 'play' : 'pause'} size={22} />
-            <span>Slideshow</span>
-          </button>
+          {/* the viewer's photos start the show from their transport */}
+          {!photoPlace && (
+            <button
+              class={'wp-text-btn' + (paused ? '' : ' active')}
+              onClick={() => { setPlaying(pausedRef.current); poke(); }}
+              title={paused ? 'Start slideshow' : 'Pause slideshow'}
+            >
+              <Icon name={paused ? 'play' : 'pause'} size={22} />
+              <span>Slideshow</span>
+            </button>
+          )}
           {liveId && (
             <button
               class={'wp-icon-btn' + (livePlay ? ' active' : '')}

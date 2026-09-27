@@ -19,7 +19,7 @@ import {
   setOverlayHidden,
 } from '../settings';
 import { Asset } from '../api/assets';
-import { PhotoGrid } from '../components/PhotoGrid';
+import { PhotoGrid, PlaceOf } from '../components/PhotoGrid';
 import { Icon } from '../components/Icon';
 import { Sidebar, Route } from '../components/Sidebar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
@@ -38,6 +38,7 @@ interface Viewer {
   index: number;
   seen: SeenStore; // what its slideshow has shown, for shuffle
   canShuffle: boolean; // opened from an album: offers Shuffle
+  placeOf?: PlaceOf; // opened from a grid: numbers photos across all of it
 }
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
@@ -196,11 +197,11 @@ export function Home({ onLogout }: { onLogout: () => void }) {
 
   // Shuffle is only offered inside an album; the all-photos views (timeline,
   // favorites, search) browse in their own order.
-  const openViewer = useCallback((assets: Asset[], index: number) => {
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: false });
+  const openViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: false, placeOf });
   }, []);
-  const openAlbumViewer = useCallback((assets: Asset[], index: number) => {
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: true });
+  const openAlbumViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf });
   }, []);
 
   // update the live asset list in the viewer as the grid loads more buckets
@@ -347,6 +348,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           startIndex={viewer.index}
           seen={viewer.seen}
           canShuffle={viewer.canShuffle}
+          placeOf={viewer.placeOf}
           onExit={closeViewer}
           onNearEnd={handleNearEnd}
         />

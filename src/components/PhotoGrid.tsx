@@ -11,11 +11,15 @@ import { EmptyState } from './EmptyState';
 const DAY_SEP = 5; // px gap inserted between day-groups on a shared row
 const MIN_LABEL_WIDTH = 230; // min px between consecutive day labels (prevents collision)
 
+// Where an asset sits in the whole grid (1-based) and how many items the grid
+// holds, for the viewer's "12 / 340"; null when it isn't in the grid.
+export type PlaceOf = (id: string) => { n: number; total: number } | null;
+
 interface Props {
   // loaders injected so the same grid serves timeline / albums / favorites
   loadBuckets: () => Promise<TimeBucket[]>;
   loadBucket: (timeBucket: string) => Promise<BucketColumns>;
-  onOpen: (assets: Asset[], index: number) => void;
+  onOpen: (assets: Asset[], index: number, placeOf?: PlaceOf) => void;
   // ref filled with a function that loads the next unloaded bucket; caller invokes it to prefetch
   loadNextUnloaded?: { current: (() => void) | null };
   // called whenever the flat asset list grows (new bucket loaded)
@@ -119,10 +123,26 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
     [loadBucket],
   );
 
+  // Stable: counts the buckets not loaded yet by their size, so the number is
+  // the asset's place in the whole timeline/album, not just in what's loaded.
+  const placeOf = useCallback<PlaceOf>((id) => {
+    let n = 0;
+    let total = 0;
+    for (const b of bucketsRef.current) {
+      const arr = loadedRef.current[b.timeBucket];
+      if (!n && arr) {
+        const k = arr.findIndex((a) => a.id === id);
+        if (k >= 0) n = total + k + 1;
+      }
+      total += arr ? arr.length : b.count;
+    }
+    return n ? { n, total } : null;
+  }, []);
+
   // Stable: resolves the bucket-local index to a global one against the latest
   // flat list (read from refs) at click time.
   const handleOpen = useCallback((tb: string, localIdx: number) => {
-    onOpenRef.current(flatRef.current, (offsetRef.current[tb] ?? 0) + localIdx);
+    onOpenRef.current(flatRef.current, (offsetRef.current[tb] ?? 0) + localIdx, placeOf);
   }, []);
 
   // flat list of everything loaded, for fullscreen traversal. Stored in refs so
