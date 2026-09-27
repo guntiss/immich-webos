@@ -1331,7 +1331,7 @@ export function WallpaperPlayer({
   const onImgDown = useCallback(
     (e: PointerEvent) => {
       if (zoomRef.current <= 1) return;
-      if ((e.target as HTMLElement).closest('button, .fs-seek')) return;
+      if ((e.target as HTMLElement).closest('button, .wp-edge-progress')) return;
       e.preventDefault();
       panDragRef.current = { on: true, x: e.clientX, y: e.clientY };
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -1734,12 +1734,23 @@ export function WallpaperPlayer({
         </div>
       )}
 
-      {/* thin progress line on the bottom edge, shown the whole time a video
-          plays, not only while the transport is up */}
+      {/* seek line on the bottom edge, shown the whole time a video plays, not
+          only while the transport is up. Click or drag it with the pointer. */}
       {curVideo && !videoError && !warming && (
-        <div class="wp-edge-progress">
-          <div class="wp-edge-progress-buffer" style={{ width: `${bufferedPct}%` }} />
-          <div class="wp-edge-progress-fill" style={{ width: `${pct}%` }} />
+        <div
+          ref={seekRef}
+          class="wp-edge-progress"
+          onPointerDown={onSeekDown}
+          onPointerMove={onSeekMove}
+          onPointerUp={onSeekUp}
+          onPointerCancel={onSeekUp}
+        >
+          <div class="wp-edge-track">
+            <div class="wp-edge-buffer" style={{ width: `${bufferedPct}%` }} />
+            <div class="wp-edge-fill" style={{ width: `${pct}%` }}>
+              <span class="wp-edge-knob" />
+            </div>
+          </div>
         </div>
       )}
 
@@ -1755,27 +1766,16 @@ export function WallpaperPlayer({
           </button>
         )}
 
-        {/* video transport + seek bar, above the options bar */}
+        {/* video transport: play/pause + time, above the caption (the seek
+            bar is the edge line) */}
         {curVideo && !videoError && !warming && (
           <div class="wp-transport">
             <button class="fs-btn round" onClick={toggleVideo}>
               <Icon name={vidPaused ? 'play' : 'pause'} size={30} />
             </button>
-            <span class="fs-time">{fmt(progress.cur)}</span>
-            <div
-              ref={seekRef}
-              class="fs-seek"
-              onPointerDown={onSeekDown}
-              onPointerMove={onSeekMove}
-              onPointerUp={onSeekUp}
-              onPointerCancel={onSeekUp}
-            >
-              <div class="fs-seek-buffer" style={{ width: `${bufferedPct}%` }} />
-              <div class="fs-seek-fill" style={{ width: `${pct}%` }}>
-                <span class="fs-seek-knob" />
-              </div>
-            </div>
-            <span class="fs-time">{fmt(progress.dur)}</span>
+            <span class="fs-time">
+              {fmt(progress.cur)} / {fmt(progress.dur)}
+            </span>
           </div>
         )}
 

@@ -1410,68 +1410,21 @@ select {
   background: rgba(40, 40, 48, 0.85);
 }
 
-/* video transport + seek bar, above the options bar */
+/* video transport: play/pause + elapsed / total, above the bottom-left caption */
 .wp-transport {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 48px;
   bottom: 112px;
   display: flex;
   align-items: center;
-  padding: 0 48px;
 }
 .wp-transport > * + * {
-  margin-left: 18px;
+  margin-left: 16px;
 }
 .fs-time {
-  font-size: 18px;
-  color: #ddd;
-  min-width: 56px;
-  text-align: center;
-}
-.fs-seek {
-  flex: 1;
-  /* 6px visible track + 14px transparent padding each side = 34px hit area.
-     box-sizing is border-box globally, so height must include the padding or
-     the content-box (the painted track) collapses to zero. */
-  height: 34px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.25);
-  cursor: pointer;
-  position: relative;
-  padding: 14px 0;
-  background-clip: content-box;
-  touch-action: none; /* let pointer drag scrub instead of scrolling/panning */
-}
-.fs-seek-fill {
-  position: absolute;
-  left: 0;
-  top: 14px;
-  bottom: 14px;
-  background: var(--immich-dark-primary);
-  border-radius: 3px;
-  pointer-events: none; /* clicks land on the track, not the fill */
-}
-.fs-seek-buffer {
-  position: absolute;
-  left: 0;
-  top: 14px;
-  bottom: 14px;
-  background: rgba(255, 255, 255, 0.55);
-  border-radius: 3px;
-  pointer-events: none;
-}
-/* draggable knob at the play head */
-.fs-seek-knob {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  width: 16px;
-  height: 16px;
-  margin: -8px -8px 0 0;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+  font-size: 20px;
+  color: #fff;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
 }
 
 /* Transient bottom toast (overlay toggle confirmation). Above the grid/rail,
@@ -1858,29 +1811,63 @@ select {
     opacity: 1;
   }
 }
-/* always-on video progress line along the bottom edge */
+/* Video seek line along the bottom edge: always on while a clip plays, thicker
+   with a knob while the controls are up or the pointer is on it. The element
+   itself is a taller transparent strip so the magic-remote pointer can grab
+   it; the painted track sits at its bottom. */
 .wp-edge-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px; /* stops where the options bar's buttons start */
+  z-index: 4; /* above .wp-player-ui, whose bottom bar would take the pointer */
+  cursor: pointer;
+  touch-action: none; /* let pointer drag scrub instead of scrolling/panning */
+}
+.wp-edge-track {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   height: 5px;
   background: rgba(255, 255, 255, 0.25);
-  pointer-events: none;
-  z-index: 3; /* above both crossfade layers (current z1, outgoing z2) */
+  transition: height 0.2s ease;
+  pointer-events: none; /* clicks land on the strip */
 }
-.wp-edge-progress-buffer,
-.wp-edge-progress-fill {
+.wp-player.show-ui .wp-edge-track,
+.wp-edge-progress:hover .wp-edge-track {
+  height: 10px;
+}
+.wp-edge-buffer,
+.wp-edge-fill {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
 }
-.wp-edge-progress-buffer {
+.wp-edge-buffer {
   background: rgba(255, 255, 255, 0.45);
 }
-.wp-edge-progress-fill {
+.wp-edge-fill {
   background: var(--immich-dark-primary);
+}
+/* play-head knob, sitting on the screen edge */
+.wp-edge-knob {
+  position: absolute;
+  right: -9px;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.wp-player.show-ui .wp-edge-knob,
+.wp-edge-progress:hover .wp-edge-knob {
+  opacity: 1;
 }
 .wp-player-ui {
   position: absolute;
