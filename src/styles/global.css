@@ -790,7 +790,8 @@ select {
    album back button. Above the grid content, below the rail (6) and viewer (50)
    so it never covers the sidebar or fullscreen. */
 .sort-btn,
-.overlay-btn {
+.overlay-btn,
+.filter-btn {
   position: absolute;
   top: 20px; /* line up with the album header's Back button (padding-top 20) */
   z-index: 4;
@@ -809,13 +810,16 @@ select {
 .sort-btn {
   right: 16px;
 }
-/* Sits left of the sort button (52px wide + 12px gap). */
-.overlay-btn {
+/* Sits left of the sort button (52px wide + 12px gap); the Photos view has
+   its photos/videos filter there instead. */
+.overlay-btn,
+.filter-btn {
   right: 80px;
 }
 /* Faded out while scrolling down; a scroll up brings it back (see Home). */
 .sort-btn.hidden,
-.overlay-btn.hidden {
+.overlay-btn.hidden,
+.filter-btn.hidden {
   opacity: 0;
   pointer-events: none;
 }
@@ -823,7 +827,8 @@ select {
    would knock these absolutely-positioned buttons back into flow on focus. Keep
    them absolute — their own box already anchors the focus ring. */
 .sort-btn:focus,
-.overlay-btn:focus {
+.overlay-btn:focus,
+.filter-btn:focus {
   position: absolute;
 }
 

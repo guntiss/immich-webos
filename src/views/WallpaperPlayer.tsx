@@ -323,6 +323,7 @@ export function WallpaperPlayer({
   const [phase, setPhase] = useState<'opening' | 'open' | 'closing'>(hero ? 'opening' : 'open');
   const closingRef = useRef(false);
   const closeRef = useRef<() => void>(() => {}); // closing: the onExit call, once shrunk
+  const heroSeq = useRef(1); // Hero.n: never reused, even once a hero is gone
   // Live Photo: motionOn keeps the clip mounted; motionVisible fades the still
   // on top of it out. The clip mounts hidden under the still and is revealed
   // only once it has a decoded frame (no black buffering flash), and the still
@@ -1274,7 +1275,7 @@ export function WallpaperPlayer({
     const box = fitBox(w / h);
     const go = (src?: string) => {
       closeRef.current = () => onExit(shown);
-      setHero((prev) => ({ n: (prev?.n ?? 0) + 1, box, from: 'none', to: boxTransform(to, box), el: still, src }));
+      setHero({ n: ++heroSeq.current, box, from: 'none', to: boxTransform(to, box), el: still, src });
       setPhase('closing');
     };
     if (still) go();
@@ -1284,18 +1285,25 @@ export function WallpaperPlayer({
 
   // Run the hero (and the scene's fade, keyed on `go`) toward its end. Effects
   // run after the frame is painted, so its start is already on screen. Once
-  // there: opened, the grown thumbnail stays until the real photo is up
-  // (below); closed, the viewer goes.
+  // it lands (its transitionend; a timer in case that never comes): opened,
+  // the grown thumbnail stays until the real photo is up (below); closed, the
+  // viewer goes. Not on a timer alone: the TV can take ~100ms to paint the
+  // first moving frame, and the viewer then closed with the photo short of
+  // its cell.
   const heroN = hero?.n;
+  const landedRef = useRef(0);
+  const heroLanded = useCallback((n: number) => {
+    if (landedRef.current >= n) return;
+    landedRef.current = n;
+    if (closingRef.current) closeRef.current();
+    else setPhase('open');
+  }, []);
   useEffect(() => {
     if (!heroN) return;
     setHero((h) => (h && h.n === heroN ? { ...h, go: true } : h));
-    const t = window.setTimeout(() => {
-      if (closingRef.current) closeRef.current();
-      else setPhase('open');
-    }, HERO_MS + 32);
+    const t = window.setTimeout(() => heroLanded(heroN), HERO_MS + 300);
     return () => window.clearTimeout(t);
-  }, [heroN]);
+  }, [heroN, heroLanded]);
   // a closing video leaves the screen once the thumbnail covers it
   useEffect(() => {
     if (phase !== 'closing') return;
@@ -2024,6 +2032,9 @@ export function WallpaperPlayer({
                 : 'none',
           }}
           ref={(node) => mountHero(node, hero.el)}
+          onTransitionEnd={(e) => {
+            if (e.propertyName === 'transform' && e.target === e.currentTarget) heroLanded(hero.n);
+          }}
         >
           {hero.src && <img src={hero.src} />}
         </div>

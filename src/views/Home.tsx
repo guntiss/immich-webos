@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'preact/hooks';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'preact/hooks';
 import {
   getTimelineBuckets,
   getBucket,
@@ -8,6 +8,8 @@ import {
   getAlbumBucket,
   logout,
   Album,
+  getTimelineStats,
+  TimelineStats,
 } from '../api/client';
 import { clearSession, getUser } from '../auth/store';
 import {
@@ -21,6 +23,7 @@ import {
 import { Asset } from '../api/assets';
 import { PhotoGrid, PlaceOf } from '../components/PhotoGrid';
 import { Icon } from '../components/Icon';
+import { IconName } from '../components/icons';
 import { Sidebar, Route } from '../components/Sidebar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Albums, AlbumsRestore } from './Albums';
@@ -32,6 +35,17 @@ import { useRemote } from '../nav/useRemote';
 import { setRoot, focusables, focus, elementInViewport, focusVisibleContent } from '../nav/focus';
 import { exitApp } from '../nav/exit';
 import { startMusic, stopMusic } from '../api/music';
+
+// The Photos view's filter: both photos and videos (the default each time the
+// app opens), or only one kind. Cycled by the header button.
+type MediaFilter = 'all' | 'photos' | 'videos';
+const MEDIA_NEXT: Record<MediaFilter, MediaFilter> = { all: 'photos', photos: 'videos', videos: 'all' };
+const MEDIA_ICON: Record<MediaFilter, IconName> = { all: 'media', photos: 'image', videos: 'video' };
+const MEDIA_LABEL: Record<MediaFilter, string> = {
+  all: 'Showing photos and videos',
+  photos: 'Showing photos only',
+  videos: 'Showing videos only',
+};
 
 interface Viewer {
   assets: Asset[];
@@ -144,6 +158,13 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 2400);
   };
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
+  const cycleMediaFilter = () => {
+    const next = MEDIA_NEXT[mediaFilter];
+    setMediaFilter(next); // the view key flips: the grid remounts and refetches
+    flashToast(MEDIA_LABEL[next]);
+  };
+
   const toggleOverlay = () => {
     const next = !overlayHidden;
     setOverlayHidden(next);
@@ -244,8 +265,51 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // reconciling the whole grid each toggle — the sidebar-animation lag. Keyed
   // only on the sort/album inputs, they stay stable across unrelated re-renders.
   const albumId = album?.id;
-  const loadTimelineBuckets = useCallback(() => getTimelineBuckets(sort.timeline), [sort.timeline]);
+  // Photos filtered to one kind: the timeline API can't filter by type, so
+  // whole buckets come in and the grid keeps the one kind. Until a bucket
+  // loads, its count only sizes its placeholder, so it's scaled by the
+  // library's share of that kind; the viewer's total comes from the same
+  // statistics.
+  const statsRef = useRef<TimelineStats | null>(null);
+  const loadTimelineBuckets = useCallback(async () => {
+    const buckets = await getTimelineBuckets(sort.timeline);
+    statsRef.current = null;
+    if (mediaFilter === 'all') return buckets;
+    const st = await getTimelineStats().catch(() => null);
+    statsRef.current = st;
+    const share = st && st.total > 0 ? (mediaFilter === 'videos' ? st.videos : st.images) / st.total : 1;
+    return buckets.map((b) => ({ ...b, count: Math.max(1, Math.round(b.count * share)) }));
+  }, [sort.timeline, mediaFilter]);
   const loadTimelineBucket = useCallback((tb: string) => getBucket(tb, sort.timeline), [sort.timeline]);
+  const keepMedia = useMemo(
+    () =>
+      mediaFilter === 'videos'
+        ? (a: Asset) => a.isVideo
+        : mediaFilter === 'photos'
+          ? (a: Asset) => !a.isVideo
+          : undefined,
+    [mediaFilter],
+  );
+  const mediaFilterRef = useRef(mediaFilter);
+  mediaFilterRef.current = mediaFilter;
+  const openTimelineViewer = useCallback(
+    (assets: Asset[], index: number, placeOf?: PlaceOf) => {
+      const st = statsRef.current;
+      const f = mediaFilterRef.current;
+      const total = !st || f === 'all' ? 0 : f === 'videos' ? st.videos : st.images;
+      openViewer(
+        assets,
+        index,
+        placeOf && total
+          ? (id) => {
+              const p = placeOf(id);
+              return p && { n: p.n, total };
+            }
+          : placeOf,
+      );
+    },
+    [openViewer],
+  );
   const loadFavoriteBuckets = useCallback(() => getFavoriteBuckets(sort.favorites), [sort.favorites]);
   const loadFavoriteBucket = useCallback((tb: string) => getFavoriteBucket(tb, sort.favorites), [sort.favorites]);
   const loadAlbumBuckets = useCallback(() => getAlbumBuckets(albumId!, sort.album), [albumId, sort.album]);
@@ -421,9 +485,24 @@ export function Home({ onLogout }: { onLogout: () => void }) {
             <Icon name={sort[section] === 'asc' ? 'sortAsc' : 'sortDesc'} size={28} />
           </button>
         )}
-        {/* Overlay show/hide toggle, sits left of the sort button. Controls
-            whether the fullscreen viewer keeps its chrome hidden while browsing. */}
-        {section && (
+        {/* Photos: the photos/videos filter, left of the sort button */}
+        {section === 'timeline' && (
+          <button
+            data-focusable
+            data-noautofocus
+            data-header-nav
+            class={'filter-btn focusable' + (sortHidden ? ' hidden' : '')}
+            onClick={cycleMediaFilter}
+            aria-label={MEDIA_LABEL[mediaFilter]}
+            title={MEDIA_LABEL[mediaFilter]}
+          >
+            <Icon name={MEDIA_ICON[mediaFilter]} size={28} />
+          </button>
+        )}
+        {/* Overlay show/hide toggle, in the same spot on the other views.
+            Controls whether the fullscreen viewer keeps its chrome hidden while
+            browsing. */}
+        {section && section !== 'timeline' && (
           <button
             data-focusable
             data-noautofocus
@@ -440,7 +519,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           class="view-enter"
           key={
             (album ? 'album:' + album.id : route) +
-            (section ? ':' + sort[section] : '')
+            (section ? ':' + sort[section] : '') +
+            (section === 'timeline' ? ':' + mediaFilter : '')
           }
         >
           {album ? (
@@ -476,11 +556,16 @@ export function Home({ onLogout }: { onLogout: () => void }) {
             <PhotoGrid
               loadBuckets={loadTimelineBuckets}
               loadBucket={loadTimelineBucket}
-              onOpen={openViewer}
+              onOpen={openTimelineViewer}
               loadNextUnloaded={loadNextRef}
               onAssetsChange={handleAssetsChange}
-              emptyLabel="No photos yet"
-              emptyHint="Upload photos from the Immich mobile or web app and they'll show up here."
+              keep={keepMedia}
+              emptyLabel={mediaFilter === 'videos' ? 'No videos' : 'No photos yet'}
+              emptyHint={
+                mediaFilter === 'all'
+                  ? "Upload photos from the Immich mobile or web app and they'll show up here."
+                  : undefined
+              }
             />
           ) : route === 'favorites' ? (
             <PhotoGrid

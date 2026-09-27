@@ -312,6 +312,17 @@ export async function getBucket(
   });
 }
 
+// How many photos and videos the Photos view holds (the timeline API can't
+// filter by type, so the view's photos/videos filter scales from these).
+export interface TimelineStats {
+  images: number;
+  videos: number;
+  total: number;
+}
+export async function getTimelineStats(): Promise<TimelineStats> {
+  return jsonReq<TimelineStats>('/assets/statistics?' + qs({ visibility: 'timeline', isTrashed: 'false' }));
+}
+
 export async function getFavoriteBuckets(order: Order = 'desc'): Promise<TimeBucket[]> {
   const q = qs({ isTrashed: 'false', isFavorite: 'true', order });
   return jsonReq<TimeBucket[]>('/timeline/buckets?' + q);

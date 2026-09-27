@@ -27,6 +27,9 @@ interface Props {
   // shown (centered, with the broken logo) when the bucket list loads empty
   emptyLabel?: string;
   emptyHint?: string;
+  // only the assets this keeps (the Photos view's photos/videos filter); the
+  // grid shows emptyLabel once every bucket has loaded with none kept
+  keep?: (a: Asset) => boolean;
 }
 
 // Date-bucketed, justified-row photo grid (Immich timeline look). Buckets load
@@ -42,7 +45,7 @@ interface Props {
 // reconcile this whole grid. All props are stable (Home useCallback's the
 // loaders; literals for the rest), so a re-render with the same view is a
 // no-op here instead of an 800ms+ diff of every thumbnail vnode.
-export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOpen, loadNextUnloaded, onAssetsChange, emptyLabel, emptyHint }: Props) {
+export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOpen, loadNextUnloaded, onAssetsChange, emptyLabel, emptyHint, keep }: Props) {
   const [buckets, setBuckets] = useState<TimeBucket[]>([]);
   const [fetched, setFetched] = useState(false); // bucket list resolved (may be empty)
   const [loaded, setLoaded] = useState<Record<string, Asset[]>>({});
@@ -116,11 +119,14 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
       if (loadedRef.current[tb] || loadingRef.current.has(tb)) return;
       loadingRef.current.add(tb);
       loadBucket(tb)
-        .then((cols) => setLoaded((m) => ({ ...m, [tb]: flattenBucket(cols) })))
+        .then((cols) => {
+          const assets = flattenBucket(cols);
+          setLoaded((m) => ({ ...m, [tb]: keep ? assets.filter(keep) : assets }));
+        })
         .catch((e) => reportError(new Error(`Failed to load bucket ${tb}: ${describeError(e)}`)))
         .finally(() => loadingRef.current.delete(tb));
     },
-    [loadBucket],
+    [loadBucket, keep],
   );
 
   // Stable: counts the buckets not loaded yet by their size, so the number is
@@ -157,6 +163,11 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
   }
   flatRef.current = flat;
   offsetRef.current = offsetOf;
+
+  // filtered down to nothing, once every bucket has had its say
+  if (keep && buckets.length && !flat.length && buckets.every((b) => loaded[b.timeBucket])) {
+    return <EmptyState title={emptyLabel ?? 'Nothing here yet'} hint={emptyHint} />;
+  }
 
   if (error) return <div class="msg error">{error}</div>;
   if (!buckets.length) {
