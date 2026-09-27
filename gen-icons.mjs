@@ -1,14 +1,18 @@
+import { existsSync } from 'node:fs';
 import sharp from 'sharp';
 
 // Source brand mark: liquid-glass rainbow flower (transparent bg, 1024x1024).
-const FLOWER = 'reference_logo/liquid_glass_flower.png';
+// The lossless original lives outside the repo; the app's own 1024px copy of
+// the same mark stands in when it's absent.
+const REF_FLOWER = 'reference_logo/liquid_glass_flower.png';
+const FLOWER = existsSync(REF_FLOWER) ? REF_FLOWER : 'src/assets/logo.webp';
 const OUT = 'public';
 
 // App icon: flower on a rounded #232329 square (matches appinfo bgColor). webOS
 // spec is 80/130 but TVs are 4K and upscale a small PNG into a blurry mess, so
 // ship higher-res (webOS downscales cleanly): icon 512, largeIcon 1024 (1:1
 // with the 1024 source flower = no upscale, sharpest the launcher can show).
-const BG = '#e5e7eb';            // --fg (near-white)
+const BG = '#232329';            // --surface-2 (dark)
 const S = 1024, R = 192;         // master canvas + corner radius (R scales with S)
 const LOGO = Math.round(S * 0.92); // flower fills ~92% of the square, centered
 
