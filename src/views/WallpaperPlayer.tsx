@@ -76,7 +76,7 @@ const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
 const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this long idle
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
-const FADE_START_MS = 150; // a crossfade starts two painted frames after the swap (see `fading`)
+const FADE_START_MS = 150; // a crossfade starts about this long after the swap (see `fading`)
 const POSTER_WAIT_MS = 1000; // a clip waits this long at most for its poster (see clipBox)
 const HERO_MS = 320; // a photo growing out of / shrinking back into its grid cell
 const HERO_EASE = 'cubic-bezier(0.2, 0, 0, 1)';
@@ -471,11 +471,11 @@ export function WallpaperPlayer({
     el.addEventListener('pause', done);
   }, []);
 
-  // A clip taking the screen over from another starts no sooner than `at`
-  // (performance.now()), once the other's layer has faded out (see the show
-  // effect). The music is ducked for it at once all the same, or it would come
-  // back in between and blank the clip fading out.
-  const startAt = useRef<{ el: HTMLVideoElement | null; at: number }>({ el: null, at: 0 });
+  // A clip taking the screen over from another starts only once `after`
+  // settles: the other's layer has faded out (see the show effect). The music
+  // is ducked for it at once all the same, or it would come back in between
+  // and blank the clip fading out.
+  const startAt = useRef<{ el: HTMLVideoElement | null; after?: Promise<void> }>({ el: null });
 
   // play() once the music has faded out, with an autoplay-policy fallback: an
   // UNMUTED play can be rejected (desktop dev without a fresh gesture) —
@@ -488,12 +488,14 @@ export function WallpaperPlayer({
       musicDucks.current.set(el, duck);
     }
     const mine = duck;
-    const wait = startAt.current.el === el ? startAt.current.at - performance.now() : 0;
-    const clear = wait > 0 ? new Promise<void>((res) => window.setTimeout(res, wait)) : undefined;
-    void Promise.all([mine.faded, clear]).then(() => {
+    const gate = startAt.current.el === el ? startAt.current.after : undefined;
+    void Promise.all([mine.faded, gate]).then(() => {
       if (musicDucks.current.get(el) !== mine) return; // handed back meanwhile
       if (cache.current.get(iRef.current)?.el !== el) return unduck(el); // moved on
       if (!wantPlay()) return; // paused during the fade: stays paused, music down
+      // buffer it in full now. Not before it plays: that takes the TV's video
+      // plane over as well, blanking the clip still on screen.
+      el.preload = 'auto';
       if (el.paused && !el.muted && takeClipWarmup()) warmUp(el);
       void el.play().catch(() => {
         if (!el.muted) {
@@ -522,29 +524,46 @@ export function WallpaperPlayer({
   // the incoming layer crossfades in and the outgoing one fades out.
   const layersRef = useRef(layers);
   layersRef.current = layers;
-  const showFrame = useCallback((f: Frame) => {
+  // settles the last swap's fade (see showFrame)
+  const fadeDone = useRef(() => {});
+  const showFrame = useCallback((f: Frame): Promise<void> => {
     // GUARD: never re-show an element that's already in the VISIBLE layer.
     // Each media element exists once; mountLayer reparents with appendChild, so
     // putting the same element into the hidden layer would STEAL it from the
     // visible one — the screen goes black while the incoming layer fades up.
     const visible = showARef.current ? layersRef.current.a : layersRef.current.b;
     const el = f.el || f.img;
-    if (el && visible && (visible.el || visible.img) === el) return;
+    if (el && visible && (visible.el || visible.img) === el) return Promise.resolve();
     const toA = !showARef.current;
     // Flip commit: the incoming layer snaps visible underneath (attach + play
     // immediately — play() on a hidden/detached video blacks the TV's hardware
     // video plane) while the outgoing layer stays OPAQUE on top, covering the
     // incoming frame's first layout/raster. Two painted frames later, start the
-    // outgoing 1->0 fade (see `fading`).
+    // outgoing 1->0 fade (see `fading`). Resolves once that fade has run (or
+    // been cut short by the next swap).
     window.cancelAnimationFrame(fadeRaf.current);
+    fadeDone.current();
     setLayers((prev) => (toA ? { a: f, b: prev.b } : { a: prev.a, b: f }));
     showARef.current = toA;
     setShowA(toA);
     setFading(false);
-    setFadeMs(manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS);
-    fadeRaf.current = requestAnimationFrame(() => {
-      fadeRaf.current = requestAnimationFrame(() => setFading(true));
+    const ms = manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS;
+    setFadeMs(ms);
+    let timer = 0;
+    const faded = new Promise<void>((res) => {
+      fadeDone.current = () => {
+        window.clearTimeout(timer);
+        fadeDone.current = () => {};
+        res();
+      };
     });
+    fadeRaf.current = requestAnimationFrame(() => {
+      fadeRaf.current = requestAnimationFrame(() => {
+        setFading(true);
+        timer = window.setTimeout(() => fadeDone.current(), ms);
+      });
+    });
+    return faded;
   }, []);
 
   // Mount a decoded still into the off-screen full-screen stage so the browser
@@ -677,7 +696,7 @@ export function WallpaperPlayer({
         if (viewer) el.style.objectFit = 'contain'; // the whole frame, not a crop
         el.playsInline = true;
         // only metadata while it's a lookahead/behind; promoted to 'auto' when
-        // it becomes the current clip (keeps at most one clip fully buffering).
+        // it plays (keeps at most one clip fully buffering).
         el.preload = 'metadata';
         el.setAttribute('playsinline', '');
         if (el.muted) el.setAttribute('muted', '');
@@ -1043,11 +1062,10 @@ export function WallpaperPlayer({
           dwellOn(intervalRef.current); // stills auto-advance on a timer
           return;
         }
-        // Video: promote to full buffering now that it's current, and only
-        // REVEAL it once it has a decoded frame — until then the previous frame
-        // stays up (no black flash mid-crossfade). Advance is driven by 'ended'.
+        // Video: only REVEAL it once it has a decoded frame — until then the
+        // previous frame stays up (no black flash mid-crossfade). It buffers
+        // in full once it plays (see playEl). Advance is driven by 'ended'.
         const el = e.el!;
-        el.preload = 'auto';
         if (e.error) return scheduleNext(0); // failed — advance past
         // The TV has one video plane, and a clip's element is a hole punched
         // through to it: a clip shows black there until its first frame is
@@ -1058,20 +1076,19 @@ export function WallpaperPlayer({
         const show = () => {
           if (!alive) return;
           const out = showARef.current ? layersRef.current.a : layersRef.current.b;
-          if (out?.el !== el) {
-            e.clip?.cover();
-            const fade = manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS;
-            startAt.current = { el, at: out?.el ? performance.now() + FADE_START_MS + fade : 0 };
-          }
           // Attach IMMEDIATELY (and play, unless held back as above) on the
           // first decodable frame. webOS runs <video> through a hardware
           // pipeline that expects the element to be in the DOM — deferring
           // the reparent until after play() begins (an earlier
           // requestVideoFrameCallback/rAF scheme) left the TV's video plane
           // black.
+          const faded = showFrame({ key, asset, src: e.src, el, wrap: e.clip?.box });
+          if (out?.el !== el) {
+            e.clip?.cover();
+            startAt.current = { el, after: out?.el ? faded : undefined };
+          }
           if (wantPlay()) playEl(el); // takes over the load's duck
           releaseLoadDuck();
-          showFrame({ key, asset, src: e.src, el, wrap: e.clip?.box });
         };
         let revealed = false;
         const reveal = () => {
@@ -1137,12 +1154,16 @@ export function WallpaperPlayer({
       alive = false;
       window.clearInterval(stallTimer);
       // pause the outgoing video and demote it back to metadata-only so it stops
-      // buffering while it's just a neighbour again
+      // buffering while it's just a neighbour again. Not before its layer has
+      // faded out: a preload change can take its picture off the TV's video
+      // plane.
       const out = cache.current.get(i)?.el;
       if (out) {
         out.pause();
         unduck(out);
-        out.preload = 'metadata';
+        window.setTimeout(() => {
+          if (cache.current.get(iRef.current)?.el !== out) out.preload = 'metadata';
+        }, FADE_START_MS + FADE_AUTO_MS);
       }
     };
     // NOTE: keyed on the index and the identity of the asset AT that index —
