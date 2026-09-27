@@ -62,7 +62,8 @@ interface Props {
 // change meaning on their own), 'seek' (Left/Right jump the clip, the video
 // transport above the bar; viewer videos only) and 'bar' (Left/Right walk the
 // options bar along the bottom edge). The selected group's controls are ringed.
-// Up past the top group, 'nav', puts the controls away.
+// Up past the top group, 'nav', puts the controls away, and Down brings hidden
+// controls back up on 'nav' before stepping further.
 type Group = 'nav' | 'seek' | 'bar';
 
 const HIDE_MS = 3000;
@@ -207,6 +208,8 @@ export function WallpaperPlayer({
   // shows on its own. Read once at open; Down still brings up the controls.
   const overlayHidden = useRef(viewer && getOverlayHidden()).current;
   const [overlay, setOverlay] = useState(!overlayHidden);
+  const overlayRef = useRef(overlay);
+  overlayRef.current = overlay;
   // which controls the d-pad drives (see Group). Back or idling drops to 'nav'.
   const [group, setGroupState] = useState<Group>('nav');
   const groupRef = useRef<Group>('nav');
@@ -1130,13 +1133,19 @@ export function WallpaperPlayer({
       }, BAR_IDLE_MS);
       return;
     }
-    if (overlayHidden) {
-      setOverlay(false);
-      return;
-    }
+    // set hidden: hidden controls stay hidden, but ones brought up on request
+    // (showControls) stay up while in use
+    if (overlayHidden && !overlayRef.current) return;
     setOverlay(true);
     hideTimer.current = window.setTimeout(() => setOverlay(false), viewer ? VIEWER_HIDE_MS : HIDE_MS);
   }, [overlayHidden, viewer]);
+
+  // Bring the controls up on request (Down while they're hidden), even with
+  // the overlay set hidden.
+  const showControls = useCallback(() => {
+    overlayRef.current = true; // sync: poke() reads the ref, not state
+    poke();
+  }, [poke]);
 
   // Move d-pad focus among the option-bar buttons by `delta` (live query — the
   // button set changes with the item shown). Wraps at both ends.
@@ -1470,6 +1479,7 @@ export function WallpaperPlayer({
       // the seek group needs a clip that loaded (a failed one shows no transport)
       const seekable = !!vid && !cache.current.get(iRef.current)?.error;
       const g = groupRef.current;
+      const shown = overlayRef.current; // as before this key's poke() below
       // Stepping to the previous/next item leaves the controls as they are
       // (hidden ones stay hidden); every other key brings them up.
       if (!(g === 'nav' && zoomRef.current <= 1 && (dir === 'left' || dir === 'right'))) poke();
@@ -1528,10 +1538,12 @@ export function WallpaperPlayer({
 
       // Down/Up step through the groups as they sit on screen: nav (the side
       // arrows), seek (the transport, videos only), bar (the bottom edge).
-      // Up from nav hides the controls; any other key brings them back.
+      // Up from nav hides the controls; Down brings hidden ones back on nav
+      // (hidden always means nav, see poke) before stepping on.
       if (dir === 'down') {
         e.preventDefault();
-        selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
+        if (!shown) showControls();
+        else selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
         return;
       }
       if (dir === 'up') {
@@ -1598,6 +1610,7 @@ export function WallpaperPlayer({
     poke,
     setPlaying,
     selectGroup,
+    showControls,
     focusBarBtn,
     viewer,
     toggleVideo,
