@@ -1871,9 +1871,13 @@ select {
   opacity: 1;
 }
 /* the viewer's slideshow: a photo's dwell filling the line (scaled, not
-   resized, so it animates on the compositor) */
+   resized, so it animates on the compositor). Half a video's line, and the
+   same with the controls up or hidden. */
 .wp-edge-progress.dwell {
   pointer-events: none;
+}
+.wp-player .wp-edge-progress.dwell .wp-edge-track {
+  height: 2.5px;
 }
 .wp-edge-progress.dwell .wp-edge-fill {
   right: 0;
