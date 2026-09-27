@@ -20,6 +20,7 @@ export const GENRES = [
   { label: 'Classical', tag: 'classical' },
 ];
 const DEFAULT_GENRE = 'lofi';
+const VOLUME = 0.7; // background level, under the TV's own volume
 const DUCK_MS = 350; // fade out before a video starts
 const UNDUCK_MS = 1000; // fade back in once it stops
 const UNDUCK_DELAY_MS = 300; // so stepping from one video to the next doesn't bounce it
@@ -115,6 +116,7 @@ function sync(): void {
 function ensureAudio(): void {
   if (audio) return;
   const a = document.createElement('audio');
+  a.volume = VOLUME;
   a.addEventListener('playing', () => {
     errors = 0;
     if (!state.stations[state.idx]?.aac) heardPcm = true;
@@ -213,7 +215,7 @@ export function duckMusic(): { faded: Promise<void>; release: () => void } {
     if (--ducks) return;
     unduckTimer = window.setTimeout(() => {
       sync(); // resumes the stream, still at zero volume
-      fadeTo(1, UNDUCK_MS);
+      fadeTo(VOLUME, UNDUCK_MS);
     }, UNDUCK_DELAY_MS);
   };
   return { faded: silent, release };
