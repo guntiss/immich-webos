@@ -12,7 +12,7 @@ import {
   getAssetPixels,
 } from '../api/client';
 import { Key, isBack, dirFromKey } from '../nav/keys';
-import { holdMusic, useMusic } from '../api/music';
+import { duckMusic, useMusic } from '../api/music';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
 import {
@@ -34,8 +34,8 @@ interface Props {
   // `startIndex` in list order and only runs as a slideshow once Play is
   // pressed. Every photo is shown whole over a blurred fill, photos zoom with
   // the scroll wheel, Live Photos play their motion, and videos play with their
-  // own sound and a seek bar. The app's background music is held off while a
-  // video is up (see holdMusic).
+  // own sound and a seek bar. Any clip playing, in either mode, fades the
+  // app's background music out first (see duckMusic).
   mode: 'photos' | 'viewer';
   startIndex?: number;
   // `shown` is the item on screen at exit, so the grid can refocus it
@@ -271,17 +271,62 @@ export function WallpaperPlayer({
   // latest "advance forward" fn, so video element listeners never go stale
   const advanceRef = useRef<() => void>(() => {});
 
-  // play() with an autoplay-policy fallback: an UNMUTED play can be rejected
-  // (desktop dev without a fresh gesture) — degrade that clip to muted rather
-  // than letting it sit black until the stall watchdog skips it.
-  const playEl = useCallback((el: HTMLVideoElement) => {
-    void el.play().catch(() => {
-      if (!el.muted) {
-        el.muted = true;
-        void el.play().catch(() => {});
-      }
-    });
+  // The background music can't play alongside a clip on webOS (see duckMusic),
+  // so each clip ducks it before playing and hands it back when it pauses, ends
+  // or goes. The viewer ducks it even before LOADING a clip (loadDuck): loading
+  // one, an original especially, can already cut the music off mid-song.
+  const musicDucks = useRef(new Map<HTMLVideoElement, ReturnType<typeof duckMusic>>());
+  const unduck = useCallback((el: HTMLVideoElement) => {
+    musicDucks.current.get(el)?.release();
+    musicDucks.current.delete(el);
   }, []);
+  const loadDuck = useRef<{ idx: number; duck: ReturnType<typeof duckMusic> } | null>(null);
+  const duckForLoad = useCallback((idx: number) => {
+    const prev = loadDuck.current;
+    if (prev?.idx === idx) return prev.duck.faded;
+    const duck = duckMusic();
+    loadDuck.current = { idx, duck };
+    prev?.duck.release();
+    return duck.faded;
+  }, []);
+  const releaseLoadDuck = useCallback(() => {
+    loadDuck.current?.duck.release();
+    loadDuck.current = null;
+  }, []);
+  useEffect(
+    () => () => {
+      musicDucks.current.forEach((d) => d.release());
+      musicDucks.current.clear();
+      releaseLoadDuck();
+    },
+    [releaseLoadDuck],
+  );
+
+  // play() once the music has faded out, with an autoplay-policy fallback: an
+  // UNMUTED play can be rejected (desktop dev without a fresh gesture) —
+  // degrade that clip to muted rather than letting it sit black until the
+  // stall watchdog skips it.
+  const playEl = useCallback((el: HTMLVideoElement) => {
+    let duck = musicDucks.current.get(el);
+    if (!duck) {
+      duck = duckMusic();
+      musicDucks.current.set(el, duck);
+    }
+    const mine = duck;
+    void mine.faded.then(() => {
+      if (musicDucks.current.get(el) !== mine) return; // handed back meanwhile
+      // moved on or paused during the fade: it never started, so no 'pause'
+      // event will hand the music back
+      if (cache.current.get(iRef.current)?.el !== el || !wantPlay()) return unduck(el);
+      void el.play().catch(() => {
+        if (!el.muted) {
+          el.muted = true;
+          void el.play().catch(() => {});
+        }
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unduck]);
 
   // Whether the current video should be playing: in the slideshow it follows
   // the show's pause; in the viewer the clip keeps its own play state.
@@ -436,9 +481,10 @@ export function WallpaperPlayer({
       if (!a) return null;
 
       if (a.isVideo) {
+        if (viewer) await duckForLoad(idx);
         const el = document.createElement('video');
         // the viewer streams the quality last picked; its clips play with their
-        // own sound, while the slideshow keeps any video muted under its music
+        // own sound; the slideshow keeps them muted
         const q: VideoQuality = viewer ? getVideoQuality() : 'transcoded';
         el.src = q === 'original' ? originalStreamUrl(a.id) : videoStreamUrl(a.id);
         el.muted = !viewer;
@@ -472,6 +518,8 @@ export function WallpaperPlayer({
           else vidHoldRef.current = true; // viewer: stay on the finished clip
         });
         el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
+        el.addEventListener('pause', () => unduck(el));
+        el.addEventListener('ended', () => unduck(el));
         el.addEventListener('error', () => {
           if (e.gone) return;
           // viewer: a transcode the TV can't play falls back to the original once
@@ -545,7 +593,7 @@ export function WallpaperPlayer({
         return null;
       }
     },
-    [assets, bump, prepStill, loadBitmapStill, viewer, playEl, wantPlay, switchSrc],
+    [assets, bump, prepStill, loadBitmapStill, viewer, playEl, wantPlay, switchSrc, unduck, duckForLoad],
   );
 
   // Load one item into the cache. Concurrent calls for the same index share
@@ -777,6 +825,8 @@ export function WallpaperPlayer({
     const key = ++keyRef.current;
     let stallTimer: number | undefined;
     window.clearTimeout(advanceTimer.current);
+    // headed somewhere else than the clip the music made way for
+    if (loadDuck.current && loadDuck.current.idx !== i) releaseLoadDuck();
     // a new item: its clip (if any) starts in play intent, at zero
     vidHoldRef.current = false;
     setVidPaused(false);
@@ -810,7 +860,8 @@ export function WallpaperPlayer({
           // earlier requestVideoFrameCallback/rAF scheme) left the TV's video
           // plane black. The earlier black frames this deferral chased were the
           // element-steal bug, fixed properly in showFrame/the show effect.
-          if (wantPlay()) playEl(el);
+          if (wantPlay()) playEl(el); // takes over the load's duck
+          releaseLoadDuck();
           showFrame({ key, asset, src: e.src, el });
         };
         if (e.decoded) reveal();
@@ -1058,11 +1109,6 @@ export function WallpaperPlayer({
   const exit = useCallback(() => {
     onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
   }, [onExit, assets]);
-
-  // The viewer's videos play with their own sound, so the background music is
-  // held off while one is the current item (the slideshow keeps them muted).
-  const musicHeld = viewer && !!asset?.isVideo;
-  useEffect(() => (musicHeld ? holdMusic() : undefined), [musicHeld]);
 
   // cancel a pending fade kick-off when the player closes
   useEffect(() => () => window.cancelAnimationFrame(fadeRaf.current), []);

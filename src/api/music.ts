@@ -2,11 +2,13 @@
 // radio.ts). It starts on Lofi every time the app opens and is steered from
 // the sidebar's Music menu.
 //
-// webOS has one hardware media pipeline, and a radio stream and a video can't
-// decode at the same time (the video plane just goes black), so whatever plays
-// a video with sound holds the music off with holdMusic() while it does. The
-// stream is also let go while the app is in the background, so it never plays
-// over live TV or another app.
+// webOS plays one media element at a time: a playing video pauses the radio,
+// and the radio resuming stops the video (even a muted one, even with the radio
+// muted). So a video first ducks the music with duckMusic(): it fades out and
+// pauses with its stream still buffered, then resumes from that buffer and
+// fades back in when the video stops, instead of reconnecting. The stream is
+// let go while the app is in the background, so it never plays over live TV
+// or another app.
 import { useEffect, useState } from 'preact/hooks';
 import { fetchStations, Station } from './radio';
 
@@ -17,6 +19,9 @@ export const GENRES = [
   { label: 'Classical', tag: 'classical' },
 ];
 const DEFAULT_GENRE = 'lofi';
+const DUCK_MS = 350; // fade out before a video starts
+const UNDUCK_MS = 1000; // fade back in once it stops
+const UNDUCK_DELAY_MS = 300; // so stepping from one video to the next doesn't bounce it
 
 export interface MusicState {
   on: boolean;
@@ -38,7 +43,10 @@ let state: MusicState = {
 const listeners = new Set<() => void>();
 let audio: HTMLAudioElement | null = null;
 let src = ''; // the stream URL set on `audio` ('' = unloaded)
-let holds = 0;
+let ducks = 0;
+let silent: Promise<void> = Promise.resolve(); // resolves once a duck has faded out
+let unduckTimer = 0;
+let fadeTimer = 0;
 let fetchToken = 0; // only the latest genre fetch lands
 let errors = 0; // stations in a row that failed to play
 let unlockArmed = false;
@@ -50,7 +58,24 @@ function set(patch: Partial<MusicState>): void {
 }
 
 function wanted(): boolean {
-  return state.on && holds === 0 && !document.hidden;
+  return state.on && !document.hidden;
+}
+
+// Ease the volume to `to` over `ms`, then call done(). A newer fade cancels it.
+function fadeTo(to: number, ms: number, done?: () => void): void {
+  const a = audio;
+  if (!a) return;
+  window.clearInterval(fadeTimer);
+  const from = a.volume;
+  const t0 = Date.now();
+  fadeTimer = window.setInterval(() => {
+    const k = Math.min(1, (Date.now() - t0) / ms);
+    a.volume = from + (to - from) * k;
+    if (k === 1) {
+      window.clearInterval(fadeTimer);
+      done?.();
+    }
+  }, 30);
 }
 
 // Drive the <audio> element from the state.
@@ -60,6 +85,7 @@ function sync(): void {
   const st = state.stations[state.idx];
   if (wanted() && st && !state.failed) {
     if (src !== st.url) a.src = src = st.url;
+    if (ducks) return; // stays paused under the video
     a.play().catch((err: Error) => {
       // blocked by an autoplay policy (desktop dev before any gesture): retry
       // on the next key press or click
@@ -75,8 +101,8 @@ function sync(): void {
       window.addEventListener('pointerdown', retry, true);
     });
   } else if (src) {
-    // unload rather than pause, so a video gets the media pipeline to itself
-    // and a live stream never resumes from a stale buffer
+    // unload rather than pause, so a live stream never resumes from a stale
+    // buffer
     src = '';
     a.pause();
     a.removeAttribute('src');
@@ -98,12 +124,12 @@ function ensureAudio(): void {
     if (++errors >= n) set({ failed: true });
     else set({ idx: (state.idx + 1) % n });
   });
-  // a muted video can still steal audio focus on webOS and pause the stream —
-  // resume it if music is meant to be on
+  // a video loading can still take the media pipeline and pause the stream —
+  // resume it if music is meant to be on (and no video is playing)
   a.addEventListener('pause', () => {
-    if (!wanted()) return;
+    if (!wanted() || ducks) return;
     window.setTimeout(() => {
-      if (wanted() && src) void a.play().catch(() => {});
+      if (wanted() && !ducks && src) void a.play().catch(() => {});
     }, 400);
   });
   document.addEventListener('visibilitychange', sync);
@@ -152,17 +178,36 @@ export function nextStation(): void {
   set({ idx: (state.idx + 1) % n, failed: false });
 }
 
-// Keep the music off until the returned release() is called.
-export function holdMusic(): () => void {
-  holds++;
-  sync();
-  let held = true;
-  return () => {
-    if (!held) return;
-    held = false;
-    holds--;
-    sync();
+// Make way for a video: the music fades out and pauses, and `faded` resolves
+// once it's silent — start the video then. release() fades it back in.
+export function duckMusic(): { faded: Promise<void>; release: () => void } {
+  window.clearTimeout(unduckTimer);
+  const a = audio;
+  if (ducks++ === 0 && a) {
+    if (a.paused) {
+      // already silent (off, still tuning in, or paused by a video loading):
+      // just make sure it comes back with a fade
+      window.clearInterval(fadeTimer);
+      a.volume = 0;
+      silent = Promise.resolve();
+    } else {
+      silent = new Promise((res) => fadeTo(0, DUCK_MS, () => {
+        a.pause();
+        res();
+      }));
+    }
+  }
+  let ducked = true;
+  const release = () => {
+    if (!ducked) return;
+    ducked = false;
+    if (--ducks) return;
+    unduckTimer = window.setTimeout(() => {
+      sync(); // resumes the stream, still at zero volume
+      fadeTo(1, UNDUCK_MS);
+    }, UNDUCK_DELAY_MS);
   };
+  return { faded: silent, release };
 }
 
 export function useMusic(): MusicState {
