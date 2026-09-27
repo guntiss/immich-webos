@@ -94,13 +94,13 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Point the shared lazy observers at THIS grid's scroll container. Child Thumb
-  // / BucketSection effects run first (root=null), so setLazyRoot rebuilds and
-  // re-observes them against the scroller — without which rootMargin is clipped
-  // by .grid-scroll and the 2-page prefetch never triggers ahead of the viewport.
-  useEffect(() => {
-    setLazyRoot(scrollRef.current);
-    return () => setLazyRoot(null);
+  // Point the shared lazy observers at THIS grid's scroll container, without
+  // which rootMargin is clipped by .grid-scroll and the 2-page prefetch never
+  // triggers ahead of the viewport. A ref, not a mount effect: the scroller only
+  // renders once the bucket list is in ("Loading…" stands in before that).
+  const setScroller = useCallback((el: HTMLDivElement | null) => {
+    scrollRef.current = el;
+    setLazyRoot(el);
   }, []);
 
   // notify caller whenever the flat asset list grows so it can update live views
@@ -170,7 +170,7 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
   return (
     <div
       class="grid-scroll"
-      ref={scrollRef}
+      ref={setScroller}
       // Clicking empty space (gaps, padding, bucket titles) would otherwise
       // move focus to <body> and drop the focus ring off the current thumbnail.
       // Suppressing focus shift on mousedown for non-focusable targets keeps the

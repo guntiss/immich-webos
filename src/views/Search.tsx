@@ -12,6 +12,7 @@ import {
 import { Asset } from '../api/assets';
 import { loadThumb, loadPersonThumb } from '../api/media';
 import { Thumb } from '../components/Thumb';
+import { lazyRootRef } from '../components/lazyObserver';
 import { justify, targetRowHeight, GRID_GAP } from '../components/justified';
 import { Icon } from '../components/Icon';
 
@@ -254,7 +255,7 @@ export function Search({ onOpen }: { onOpen: (assets: Asset[], index: number) =>
           {results && !results.length && !busy && (
             <div class="msg">No results for “{resultLabel}”.</div>
           )}
-          <div class="grid-scroll">
+          <div class="grid-scroll" ref={lazyRootRef}>
             {rows.map((row, ri) => (
               <div class="jrow" key={ri} style={{ height: `${row.height}px` }}>
                 {row.items.map((a) => {

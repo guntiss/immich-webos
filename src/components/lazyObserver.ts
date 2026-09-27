@@ -67,17 +67,21 @@ export function setLazyRoot(root: Element | null): void {
   for (const p of pools) p.setRoot(root);
 }
 
+// setLazyRoot as a ref callback for a scroll container, so the root follows
+// the element itself as it mounts and unmounts. Stable, so it runs only then.
+export const lazyRootRef = (el: Element | null): void => setLazyRoot(el);
+
 // Prefetch window, sized in viewport heights ("pages") so it tracks the screen.
-// We keep roughly two pages above AND below the viewport loaded so scrolling
+// We keep roughly four pages above AND below the viewport loaded so scrolling
 // back and forth never waits on a refetch (the thumbnails stay mounted and in
 // the media LRU cache). rootMargin expands the root box in every direction, so
-// `2 pages` means thumbnails within ~2 pages of the viewport in either
-// direction start loading.
+// `4 pages` means thumbnails within ~4 pages of the viewport in either
+// direction start loading. Two left a fast d-pad scroll showing grey cells.
 const PAGE = (typeof window !== 'undefined' && window.innerHeight) || 720;
 
-// ~2 pages: fetch a thumbnail well before it scrolls into view.
-export const thumbObserver = makeObserver(`${PAGE * 2}px`);
+// ~4 pages: fetch a thumbnail well before it scrolls into view.
+export const thumbObserver = makeObserver(`${PAGE * 4}px`);
 // A bit further out than the thumbnails, so a bucket's assets have loaded by
 // the time its thumbnails enter the prefetch window (thumbs can't exist until
 // their bucket's asset list arrives).
-export const bucketObserver = makeObserver(`${PAGE * 2 + 300}px`);
+export const bucketObserver = makeObserver(`${PAGE * 4 + 300}px`);

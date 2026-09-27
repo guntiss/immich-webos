@@ -42,7 +42,11 @@ const inflight = new Map<string, Promise<string>>();
 // floods the main thread with blob decodes, which is felt as scroll jank. Cap
 // the number of in-flight network fetches and queue the rest. The cache /
 // inflight dedup above means we never queue the same asset twice.
-const MAX_CONCURRENT = 6;
+// Not too tight either: a slot only frees once the main thread gets round to
+// the response, and mid-scroll that's slow. At 6 a held-down d-pad drained the
+// queue at ~20 thumbs/s (each fetch ~25ms, the network mostly idle) and left
+// most of the screen grey; more in flight lets the network stack keep going.
+const MAX_CONCURRENT = 16;
 let active = 0;
 const queue: Array<() => void> = [];
 
