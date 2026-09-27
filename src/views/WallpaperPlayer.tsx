@@ -31,9 +31,9 @@ interface Props {
   assets: Asset[];
   // 'photos': the Slideshow page's show — shuffled, auto-advancing, landscape
   // stills face-cropped to fill the screen.
-  // 'viewer': the photo viewer opened from a grid — starts PAUSED on
-  // `startIndex` in list order and only runs as a slideshow once play is
-  // pressed. Every photo is shown whole over a blurred fill, photos zoom with
+  // 'viewer': the photo viewer opened from a grid — starts on `startIndex` in
+  // list order with the slideshow running; pausing it browses by hand. Every
+  // photo is shown whole over a blurred fill, photos zoom with
   // the scroll wheel, Live Photos play their motion, and videos play with their
   // own sound and a seek bar. Any clip playing, in either mode, fades the
   // app's background music out first (see duckMusic).
@@ -269,8 +269,8 @@ export function WallpaperPlayer({
   // length of the running crossfade: shorter when stepping by hand
   const [fadeMs, setFadeMs] = useState(FADE_AUTO_MS);
   const manualRef = useRef(false); // the pending frame change came from a key press
-  // The viewer opens paused: it's for browsing, and Slideshow turns it into a show.
-  const [paused, setPaused] = useState(viewer);
+  // Both modes open with the show running; the viewer pauses it to browse.
+  const [paused, setPaused] = useState(false);
   // Viewer with "hide player overlay" set in the grid header: the chrome never
   // shows on its own. Read once at open; Down still brings up the controls.
   const overlayHidden = useRef(viewer && getOverlayHidden()).current;
@@ -387,7 +387,7 @@ export function WallpaperPlayer({
   const hideTimer = useRef<number | undefined>(undefined);
   const iRef = useRef(i);
   iRef.current = i;
-  const pausedRef = useRef(viewer);
+  const pausedRef = useRef(false);
   pausedRef.current = paused;
   // latest "advance forward" fn, so video element listeners never go stale
   const advanceRef = useRef<() => void>(() => {});

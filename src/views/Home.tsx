@@ -424,7 +424,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
       {/* Viewer is an overlay (position:fixed), NOT a replacement for the grid.
           Keeping the grid mounted underneath preserves its scroll position and
           loaded buckets, so closing returns to the exact spot. It's the
-          slideshow player, opened paused on the chosen photo. */}
+          slideshow player, opened on the chosen photo with the show running. */}
       {viewer && (
         <WallpaperPlayer
           mode="viewer"
