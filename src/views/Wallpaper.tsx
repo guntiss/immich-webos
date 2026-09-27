@@ -16,6 +16,7 @@ import { loadThumb, loadBlobUrl, revoke } from '../api/media';
 import { Icon } from '../components/Icon';
 import { IconName } from '../components/icons';
 import { WallpaperPlayer } from './WallpaperPlayer';
+import { seenStore, SeenStore } from './wallpaperSeen';
 import { aimAtFaces } from './faceCrop';
 import { EmptyState } from '../components/EmptyState';
 import { Key } from '../nav/keys';
@@ -98,6 +99,8 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
     filter: (a: Asset) => boolean;
     loading: boolean;
     order: Order; // drives the shuffle-off resort direction
+    shuffle: boolean; // mirrors the player's toggle: skip already-shown items
+    seen: SeenStore; // what this source has already shown (persisted)
     fetchBucket: (timeBucket: string) => Promise<BucketColumns | null>;
   } | null>(null);
 
@@ -235,15 +238,24 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
   );
 
   // Pull the next bucket(s) until one yields assets matching the filter. Returns
-  // that batch (empty when the collection is exhausted).
+  // that batch (empty when the collection is exhausted). While shuffling, items
+  // already shown are skipped; once everything has been shown, the memory is
+  // cleared and a fresh random pass over all buckets begins.
   const pullBatch = async (token: number): Promise<Asset[]> => {
     const f = feed.current;
     if (!f) return [];
-    while (f.idx < f.buckets.length) {
-      const cols = await f.fetchBucket(f.buckets[f.idx++].timeBucket).catch(() => null);
-      if (prepToken.current !== token) return [];
-      const add = cols ? flattenBucket(cols).filter(f.filter) : [];
-      if (add.length) return add;
+    for (let pass = 0; pass < 2; pass++) {
+      while (f.idx < f.buckets.length) {
+        const cols = await f.fetchBucket(f.buckets[f.idx++].timeBucket).catch(() => null);
+        if (prepToken.current !== token) return [];
+        let add = cols ? flattenBucket(cols).filter(f.filter) : [];
+        if (f.shuffle) add = add.filter((a) => !f.seen.has(a.id));
+        if (add.length) return add;
+      }
+      if (!f.shuffle || !f.seen.size()) return [];
+      f.seen.clear();
+      f.buckets = pickRandom(f.buckets, f.buckets.length);
+      f.idx = 0;
     }
     return [];
   };
@@ -267,6 +279,7 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
   const onShuffleChange = useCallback((on: boolean) => {
     const f = feed.current;
     if (!f) return;
+    f.shuffle = on;
     const rest = f.buckets.slice(f.idx);
     if (on) {
       for (let k = rest.length - 1; k > 0; k--) {
@@ -298,7 +311,16 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
     const fetchBucket = albumId
       ? (tb: string) => getAlbumBucket(albumId, tb, order)
       : (tb: string) => getBucket(tb, order);
-    feed.current = { buckets, idx: 0, filter: c.filter, loading: false, order, fetchBucket };
+    feed.current = {
+      buckets,
+      idx: 0,
+      filter: c.filter,
+      loading: false,
+      order,
+      shuffle: false,
+      seen: seenStore(c.id),
+      fetchBucket,
+    };
     const first = await pullBatch(token); // just the first non-empty bucket
     if (prepToken.current !== token) return;
     setPreparing(null);
@@ -348,10 +370,11 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
         </div>
       )}
 
-      {player && (
+      {player && feed.current && (
         <WallpaperPlayer
           assets={player}
           mode={playerMode}
+          seen={feed.current.seen}
           onExit={() => setPlayer(null)}
           onNearEnd={loadMore}
           onShuffleChange={onShuffleChange}

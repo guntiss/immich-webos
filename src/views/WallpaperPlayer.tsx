@@ -8,6 +8,7 @@ import { fetchStations, Station } from '../api/radio';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
 import { aimAtFaces } from './faceCrop';
+import { SeenStore } from './wallpaperSeen';
 
 interface Props {
   assets: Asset[];
@@ -23,6 +24,8 @@ interface Props {
   // called when the user toggles shuffle. The feed randomizes its remaining
   // bucket order so shuffle spans the whole library, not just the loaded page.
   onShuffleChange?: (on: boolean) => void;
+  // what this source has already shown (persisted): shuffle skips these
+  seen: SeenStore;
 }
 
 const HIDE_MS = 3000;
@@ -74,7 +77,7 @@ interface Frame {
 // only moves to an item whose media is loaded — never onto a black/unready
 // frame. Loops forever. Owns its own key listener; the shell disables its
 // remote handler while this is up.
-export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, onShuffleChange }: Props) {
+export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, onShuffleChange, seen }: Props) {
   const [i, setI] = useState(0);
   // Play order: `order` is a permutation of indices into assetsProp; `assets`
   // (used everywhere below) is the sequenced list the show walks. Sequential
@@ -85,6 +88,11 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const shuffleRef = useRef(false);
   shuffleRef.current = shuffle;
   const [order, setOrder] = useState<number[]>(() => assetsProp.map((_, k) => k));
+  const orderRef = useRef(order);
+  orderRef.current = order;
+  // bumped by the shuffle toggle so the show effect re-runs even when index 0
+  // keeps the same asset (the frame on screen is kept at the head)
+  const [epoch, setEpoch] = useState(0);
   const assets = useMemo(() => order.map((k) => assetsProp[k]).filter(Boolean), [order, assetsProp]);
   // Two persistent crossfade layers (A/B), long-lived DOM nodes that media
   // elements are reparented into (never recreated, so no re-decode). Showing a
@@ -392,30 +400,51 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   }, []);
 
   // Keep `order` covering every asset. onNearEnd appends to the live list, so
-  // when it grows, tack the new indices on the end (shuffled among themselves
-  // when shuffle is on). Existing positions keep their mapping — the cache and
-  // current index stay valid, no reload.
+  // when it grows, tack the new indices on the end (when shuffle is on: minus
+  // anything already shown, shuffled among themselves). Existing positions keep
+  // their mapping — the cache and current index stay valid, no reload.
+  const orderedUpTo = useRef(assetsProp.length); // assetsProp indices already placed
   useEffect(() => {
-    setOrder((prev) => {
-      if (prev.length >= assetsProp.length) return prev;
-      const added: number[] = [];
-      for (let k = prev.length; k < assetsProp.length; k++) added.push(k);
-      if (shuffleRef.current) weightedShuffle(added, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
-      return [...prev, ...added];
-    });
+    const from = orderedUpTo.current;
+    if (assetsProp.length <= from) return;
+    orderedUpTo.current = assetsProp.length;
+    let added: number[] = [];
+    for (let k = from; k < assetsProp.length; k++) added.push(k);
+    if (shuffleRef.current) {
+      added = added.filter((k) => !seen.has(assetsProp[k].id));
+      weightedShuffle(added, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
+    }
+    if (added.length) setOrder((prev) => [...prev, ...added]);
   }, [assetsProp.length]);
 
   // Toggle shuffle: rebuild the whole order, reset the cache, restart at 0.
+  // Shuffle skips everything this source has already shown (remembered across
+  // sessions) and keeps the frame on screen at the head, carrying its cache
+  // entry along, so the toggle doesn't cut away from it — and still plays when
+  // every loaded item has been seen (onNearEnd then pulls unseen ones).
   const toggleShuffle = useCallback(() => {
     const next = !shuffleRef.current;
-    const ids = assetsProp.map((_, k) => k);
-    if (next) weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
+    let ids = assetsProp.map((_, k) => k);
+    let keep: Cached | undefined;
+    if (next) {
+      const cur = orderRef.current[iRef.current];
+      ids = ids.filter((k) => k !== cur && !seen.has(assetsProp[k].id));
+      weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
+      if (cur !== undefined) {
+        ids.unshift(cur);
+        keep = cache.current.get(iRef.current);
+        cache.current.delete(iRef.current);
+      }
+    }
     clearCache();
+    if (keep) cache.current.set(0, keep);
+    orderedUpTo.current = assetsProp.length;
     setShuffle(next);
     setOrder(ids);
     setI(0);
+    setEpoch((n) => n + 1);
     onShuffleChange?.(next); // widen the bound: feed randomizes remaining buckets
-  }, [assetsProp, clearCache, onShuffleChange]);
+  }, [assetsProp, clearCache, onShuffleChange, seen]);
 
   // An index is navigable only once its media is loaded: a still's blob is ready,
   // or a video has decoded its first frame (or errored, so it can be skipped).
@@ -434,7 +463,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     (delta: number) => {
       const n = iRef.current + delta;
       if (n < 0) return assets.length - 1; // wrap to last
-      if (n >= assets.length) return 0; // wrap to first
+      // wrap to first — except while shuffling: hold for the next unseen batch
+      // (onNearEnd) rather than replay what was just shown
+      if (n >= assets.length) return shuffleRef.current ? iRef.current : 0;
       return n;
     },
     [assets.length],
@@ -452,6 +483,9 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const advance = useCallback(
     (delta: number, manual = false) => {
       const n = targetIndex(delta);
+      // nowhere else to go (yet): leave the frame and timers alone; the auto
+      // retry loop polls until onNearEnd has appended more
+      if (n === iRef.current) return false;
       navToken.current++; // supersede any pending manual nav
       if (isLoaded(n)) {
         setNavPending(false);
@@ -578,7 +612,6 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       }
     }
     evict(i);
-    if (onNearEnd && i >= assets.length - 3) onNearEnd();
 
     return () => {
       alive = false;
@@ -599,12 +632,23 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     // on screen when a bucket load landed). asset?.id covers the one case a
     // re-run IS wanted: assets[i] itself changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [i, asset?.id]);
+  }, [i, asset?.id, epoch]);
+
+  // Page in more when nearing the end. Also re-checks when the live list grows
+  // but the order didn't reach past the end (a small batch, or one whose items
+  // shuffle filtered out as already seen), so the show never stalls there.
+  useEffect(() => {
+    if (onNearEnd && i >= assets.length - 3) onNearEnd();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [i, assets.length, assetsProp.length]);
 
   // track which asset is actually on screen (the frame in the visible layer)
   useEffect(() => {
     const shown = showA ? layers.a : layers.b;
-    if (shown) setShownAsset(shown.asset);
+    if (shown) {
+      setShownAsset(shown.asset);
+      seen.add(shown.asset.id); // remembered so shuffle won't repeat it
+    }
   }, [layers, showA]);
 
   // Reverse-geocode the SHOWN asset and commit place+date together, once BOTH
@@ -667,6 +711,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       window.clearTimeout(pillTimer.current);
       for (const e of held.values()) teardown(e);
       held.clear();
+      seen.flush();
     };
   }, []);
 
