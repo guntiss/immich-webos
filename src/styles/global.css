@@ -1917,7 +1917,7 @@ select {
   right: 0;
   bottom: 0;
   height: 5px;
-  background: rgba(255, 255, 255, 0.25);
+  background: #404040; /* opaque, so the frame doesn't show through */
   transition: height 0.2s ease;
   pointer-events: none; /* clicks land on the strip */
 }
@@ -1932,7 +1932,8 @@ select {
   top: 0;
   bottom: 0;
 }
-/* opaque: the grey the old see-through buffer showed over a dark frame */
+/* the greys (track and buffer) are what the old see-through ones showed over
+   a dark frame */
 .wp-edge-buffer {
   background: #969696;
 }
