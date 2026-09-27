@@ -22,7 +22,7 @@ interface Props {
   // called when nearing the end of the loaded list so more buckets can load
   onNearEnd?: () => void;
   // called when the user toggles shuffle. The feed randomizes its remaining
-  // bucket order so shuffle spans the whole library, not just the loaded page.
+  // bucket order so shuffle spans the whole source, not just the loaded page.
   onShuffleChange?: (on: boolean) => void;
   // what this source has already shown (persisted): shuffle skips these
   seen: SeenStore;
@@ -80,14 +80,19 @@ interface Frame {
 export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, onShuffleChange, seen }: Props) {
   const [i, setI] = useState(0);
   // Play order: `order` is a permutation of indices into assetsProp; `assets`
-  // (used everywhere below) is the sequenced list the show walks. Sequential
-  // by default (identity order); shuffle rebuilds it as a random permutation.
+  // (used everywhere below) is the sequenced list the show walks. Shuffled by
+  // default (a random permutation); turning shuffle off restores identity order.
   // Keeping playback consecutive over `assets` preserves the prefetch window,
-  // eviction, and near-end paging unchanged — only the mapping changes.
-  const [shuffle, setShuffle] = useState(false);
-  const shuffleRef = useRef(false);
+  // eviction, and near-end paging unchanged — only the mapping changes. The
+  // feed starts shuffled too, so the first batch is already unseen items.
+  const [shuffle, setShuffle] = useState(true);
+  const shuffleRef = useRef(true);
   shuffleRef.current = shuffle;
-  const [order, setOrder] = useState<number[]>(() => assetsProp.map((_, k) => k));
+  const [order, setOrder] = useState<number[]>(() => {
+    const ids = assetsProp.map((_, k) => k);
+    weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
+    return ids;
+  });
   const orderRef = useRef(order);
   orderRef.current = order;
   // bumped by the shuffle toggle so the show effect re-runs even when index 0

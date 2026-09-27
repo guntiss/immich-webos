@@ -418,14 +418,6 @@ async function metadataSearch(
   return res.assets.items.map(mapAsset);
 }
 
-// Assets by type (IMAGE/VIDEO), newest first. One request, so sparse types
-// (e.g. videos) return quickly instead of walking the whole timeline.
-export async function searchByType(
-  type?: 'IMAGE' | 'VIDEO',
-): Promise<import('./assets').Asset[]> {
-  return metadataSearch(type ? { type } : {});
-}
-
 // --- People ---
 
 export interface Person {

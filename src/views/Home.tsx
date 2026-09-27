@@ -26,7 +26,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Albums, AlbumsRestore } from './Albums';
 import { Search } from './Search';
 import { Fullscreen } from './Fullscreen';
-import { Wallpaper, resetWallpaperCaches } from './Wallpaper';
+import { Wallpaper } from './Wallpaper';
 import { useRemote } from '../nav/useRemote';
 import { setRoot, focusables, focus, elementInViewport, focusVisibleContent } from '../nav/focus';
 import { exitApp } from '../nav/exit';
@@ -309,7 +309,6 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     setConfirmLogout(false);
     await logout();
     clearSession();
-    resetWallpaperCaches(); // drop the previous account's hero/pool caches
     onLogout();
   };
 
@@ -352,7 +351,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
         <div class="sidebar-catch" onClick={collapseSidebar} />
       )}
 
-      <main class={'content ' + (route === 'wallpaper' ? 'wallpaper' : '')}>
+      <main class="content">
         {/* keyed wrapper: changing view replaces it, replaying the fade-in so
             switching tabs eases in instead of swapping abruptly */}
         {/* Floating sort toggle, top-right of the content. data-noautofocus keeps

@@ -60,3 +60,21 @@ export function setSort(section: SortSection, dir: SortDir): void {
   if (dir === 'asc') localStorage.setItem(SORT_KEY + section, 'asc');
   else localStorage.removeItem(SORT_KEY + section);
 }
+
+// Albums the wallpaper slideshow draws from, by id. Empty until the user picks
+// some on the Wallpaper page; the pick sticks across restarts.
+const WALLPAPER_ALBUMS_KEY = 'immich.wallpaperAlbums';
+
+export function getWallpaperAlbums(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(WALLPAPER_ALBUMS_KEY) || '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setWallpaperAlbums(ids: string[]): void {
+  if (ids.length) localStorage.setItem(WALLPAPER_ALBUMS_KEY, JSON.stringify(ids));
+  else localStorage.removeItem(WALLPAPER_ALBUMS_KEY);
+}
