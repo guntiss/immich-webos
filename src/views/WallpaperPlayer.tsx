@@ -62,8 +62,8 @@ interface Props {
 // change meaning on their own), 'seek' (Left/Right jump the clip, the video
 // transport above the bar; viewer videos only) and 'bar' (Left/Right walk the
 // options bar along the bottom edge). The selected group's controls are ringed.
-// Up past the top group, 'nav', puts the controls away, and Down brings hidden
-// controls back up on 'nav' before stepping further.
+// Up past the top group ('nav') or Down past the bottom one ('bar') puts the
+// controls away, and either key brings hidden controls back up on 'nav'.
 type Group = 'nav' | 'seek' | 'bar';
 
 const HIDE_MS = 3000;
@@ -1119,18 +1119,22 @@ export function WallpaperPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs]);
 
+  // Put the controls away AND drop back to previous/next, so hidden controls
+  // always mean the default group.
+  const hideControls = useCallback(() => {
+    window.clearTimeout(hideTimer.current);
+    groupRef.current = 'nav';
+    setGroupState('nav');
+    (document.activeElement as HTMLElement | null)?.blur();
+    setOverlay(false);
+  }, []);
+
   const poke = useCallback(() => {
     window.clearTimeout(hideTimer.current);
     if (groupRef.current !== 'nav') {
       setOverlay(true);
-      // a group picked but idle: after a longer window, hide the controls AND
-      // drop back to previous/next, so hidden controls always mean the default
-      hideTimer.current = window.setTimeout(() => {
-        groupRef.current = 'nav';
-        setGroupState('nav');
-        (document.activeElement as HTMLElement | null)?.blur();
-        setOverlay(false);
-      }, BAR_IDLE_MS);
+      // a group picked but idle: after a longer window, hide the controls
+      hideTimer.current = window.setTimeout(hideControls, BAR_IDLE_MS);
       return;
     }
     // set hidden: hidden controls stay hidden, but ones brought up on request
@@ -1138,9 +1142,9 @@ export function WallpaperPlayer({
     if (overlayHidden && !overlayRef.current) return;
     setOverlay(true);
     hideTimer.current = window.setTimeout(() => setOverlay(false), viewer ? VIEWER_HIDE_MS : HIDE_MS);
-  }, [overlayHidden, viewer]);
+  }, [hideControls, overlayHidden, viewer]);
 
-  // Bring the controls up on request (Down while they're hidden), even with
+  // Bring the controls up on request (Up/Down while they're hidden), even with
   // the overlay set hidden.
   const showControls = useCallback(() => {
     overlayRef.current = true; // sync: poke() reads the ref, not state
@@ -1493,7 +1497,8 @@ export function WallpaperPlayer({
       }
 
       // options bar: Left/Right walk its buttons, OK presses one, Up steps
-      // back up. The media keys still reach the clip/show below.
+      // back up, Down (past the bottom) hides the controls. The media keys
+      // still reach the clip/show below.
       if (g === 'bar') {
         if (dir === 'left' || dir === 'right') {
           e.preventDefault();
@@ -1507,6 +1512,7 @@ export function WallpaperPlayer({
         }
         if (dir === 'down') {
           e.preventDefault();
+          hideControls();
           return;
         }
         if (code === Key.Enter) {
@@ -1538,8 +1544,9 @@ export function WallpaperPlayer({
 
       // Down/Up step through the groups as they sit on screen: nav (the side
       // arrows), seek (the transport, videos only), bar (the bottom edge).
-      // Up from nav hides the controls; Down brings hidden ones back on nav
-      // (hidden always means nav, see poke) before stepping on.
+      // Up from nav hides the controls (as Down from the bar does), and either
+      // key brings hidden ones back on nav (hidden always means nav, see
+      // hideControls) before stepping on.
       if (dir === 'down') {
         e.preventDefault();
         if (!shown) showControls();
@@ -1548,11 +1555,9 @@ export function WallpaperPlayer({
       }
       if (dir === 'up') {
         e.preventDefault();
-        if (g === 'seek') selectGroup('nav');
-        else {
-          window.clearTimeout(hideTimer.current); // undo the poke() above
-          setOverlay(false);
-        }
+        if (!shown) showControls();
+        else if (g === 'seek') selectGroup('nav');
+        else hideControls();
         return;
       }
 
@@ -1611,6 +1616,7 @@ export function WallpaperPlayer({
     setPlaying,
     selectGroup,
     showControls,
+    hideControls,
     focusBarBtn,
     viewer,
     toggleVideo,
