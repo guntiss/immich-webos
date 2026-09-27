@@ -270,6 +270,8 @@ export function WallpaperPlayer({
   pausedRef.current = paused;
   // latest "advance forward" fn, so video element listeners never go stale
   const advanceRef = useRef<() => void>(() => {});
+  // latest exit fn, for the same reason
+  const exitRef = useRef<() => void>(() => {});
 
   // The background music can't play alongside a clip on webOS (see duckMusic),
   // so each clip ducks it before playing and hands it back when it pauses, ends
@@ -515,7 +517,10 @@ export function WallpaperPlayer({
         el.addEventListener('ended', () => {
           if (iRef.current !== idx) return;
           if (!pausedRef.current) advanceRef.current();
-          else vidHoldRef.current = true; // viewer: stay on the finished clip
+          // viewer, browsing: a finished clip goes back to the grid, as if Back
+          // were pressed
+          else if (viewer) exitRef.current();
+          else vidHoldRef.current = true;
         });
         el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
         el.addEventListener('pause', () => unduck(el));
@@ -1109,6 +1114,7 @@ export function WallpaperPlayer({
   const exit = useCallback(() => {
     onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
   }, [onExit, assets]);
+  exitRef.current = exit;
 
   // cancel a pending fade kick-off when the player closes
   useEffect(() => () => window.cancelAnimationFrame(fadeRaf.current), []);
