@@ -258,7 +258,7 @@ export function WallpaperPlayer({
   // Viewer with "hide player overlay" set in the grid header: the chrome never
   // shows on its own. Read once at open; Down still brings up the controls.
   const overlayHidden = useRef(viewer && getOverlayHidden()).current;
-  const [overlay, setOverlay] = useState(!overlayHidden);
+  const [overlay, setOverlay] = useState(!viewer); // the viewer opens without it
   const overlayRef = useRef(overlay);
   overlayRef.current = overlay;
   // which controls the d-pad drives (see Group). Back or idling drops to 'nav'.
@@ -1309,10 +1309,11 @@ export function WallpaperPlayer({
   // cancel a pending fade kick-off when the player closes
   useEffect(() => () => window.cancelAnimationFrame(fadeRaf.current), []);
 
-  // show the overlay briefly at start; afterwards it appears only on interaction
-  // (key / pointer), never on an automatic photo change
+  // The Slideshow page shows the overlay briefly at start; the viewer opens
+  // with it hidden. Afterwards it appears only on interaction (key / pointer),
+  // never on an automatic photo change.
   useEffect(() => {
-    poke();
+    if (!viewer) poke();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
