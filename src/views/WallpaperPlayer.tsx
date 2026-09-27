@@ -29,12 +29,11 @@ const HIDE_MS = 3000;
 const BAR_IDLE_MS = 8000; // hide the focused bar after this long with no input
 const CAPTION_DELAY_MS = 1000; // location/date animate in this long after a transition
 const SPEEDS = [
+  { label: '5s', ms: 5000 },
   { label: '10s', ms: 10000 },
-  { label: '30s', ms: 30000 },
-  { label: '5m', ms: 300000 },
-  { label: '10m', ms: 600000 },
+  { label: '15s', ms: 15000 },
 ];
-const DEFAULT_MS = SPEEDS[1].ms; // dwell per still (30s)
+const DEFAULT_MS = SPEEDS[1].ms; // dwell per still (10s)
 const GENRES = [
   { label: 'Ambient', tag: 'ambient' },
   { label: 'Lofi', tag: 'lofi' },
@@ -213,18 +212,35 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // (one to lay out, one to paint). The element is later reparented into the
   // visible layer already fitted — the transition can't hitch on a resize. If
   // the stage isn't mounted yet (first render), resolve immediately.
-  const fitOnStage = useCallback((img: HTMLImageElement): Promise<void> => {
+  const fitOnStage = useCallback((img: HTMLImageElement, fit: 'cover' | 'contain'): Promise<void> => {
     return new Promise((res) => {
       const stage = stageRef.current;
       if (!stage) return res();
       img.style.width = '100%';
       img.style.height = '100%';
-      img.style.objectFit = 'cover';
+      img.style.objectFit = fit;
       if (img.parentElement !== stage) stage.appendChild(img);
       void img.offsetWidth; // force synchronous layout at full-screen size
       requestAnimationFrame(() => requestAnimationFrame(() => res()));
     });
   }, []);
+
+  // Ready a decoded still for display. Portrait shots are shown WHOLE
+  // (contain) over a blurred, dimmed copy of themselves filling the side bars
+  // — a cover crop of a portrait on a 16:9 screen threw away over half the
+  // photo. Everything else keeps the face-aimed full-screen cover crop.
+  const prepStill = useCallback(
+    async (img: HTMLImageElement, id: string): Promise<void> => {
+      if (img.naturalHeight > img.naturalWidth) {
+        await applyBlurBackdrop(img);
+        await fitOnStage(img, 'contain');
+      } else {
+        await aimAtFaces(img, id); // aim the cover crop BEFORE the stage raster
+        await fitOnStage(img, 'cover');
+      }
+    },
+    [fitOnStage],
+  );
 
   // Load one item into the cache. Stills: fetch original (HEIC/RAW fall back to
   // the preview JPEG), ready once the blob resolves. Videos: a hidden <video>
@@ -295,8 +311,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
           revoke(src); // undecodable original (e.g. HEIC/RAW) — drop it, try preview
           throw decodeErr;
         }
-        await aimAtFaces(img, a.id); // aim the cover crop BEFORE the stage raster
-        await fitOnStage(img); // lay out + raster at full-screen before it's eligible
+        await prepStill(img, a.id); // lay out + raster at full-screen before it's eligible
         const e: Cached = { src, isVideo: false, blob: true, ready: true, decoded: true, img };
         cache.current.set(idx, e);
         return e;
@@ -304,8 +319,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         try {
           const src = await loadBlobUrl(thumbnailUrl(a.id, 'preview'));
           const img = await decodeStill(src); // preview is always a browser-decodable JPEG
-          await aimAtFaces(img, a.id);
-          await fitOnStage(img);
+          await prepStill(img, a.id);
           const e: Cached = { src, isVideo: false, blob: true, ready: true, decoded: true, img };
           cache.current.set(idx, e);
           return e;
@@ -314,7 +328,7 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         }
       }
     },
-    [assets, bump, fitOnStage, mode, playEl],
+    [assets, bump, prepStill, mode, playEl],
   );
 
   // Pre-download ~PREBUFFER_S of a NEIGHBOUR video, then back off so it doesn't
@@ -1042,6 +1056,53 @@ function decodeStill(src: string): Promise<HTMLImageElement> {
   img.src = src;
   if (!img.decode) return Promise.resolve(img); // can't verify — assume paintable
   return img.decode().then(() => img);
+}
+
+// Paint a blurred, dimmed, screen-filling copy of a still as the <img>'s own
+// CSS background, so with object-fit:contain the side bars show the photo's
+// colors instead of black. It stays ONE element — the layer/stage reparenting
+// is untouched. The blur runs once on a tiny canvas (cheap on TV hardware,
+// unlike a live CSS filter over a 4K layer) and the browser's upscale adds more
+// softness. The canvas overshoots the screen by a margin that is scaled
+// off-screen, hiding the blur's dark edge falloff. Best-effort: on any failure
+// (e.g. a tainted canvas) the bars just stay black.
+const BACKDROP_W = 192; // backdrop canvas width; height follows the screen aspect
+const BACKDROP_BLUR = 6; // px at canvas scale (~60px at 1080p)
+async function applyBlurBackdrop(img: HTMLImageElement): Promise<void> {
+  try {
+    const sw = window.innerWidth || 1920;
+    const sh = window.innerHeight || 1080;
+    const w = BACKDROP_W;
+    const h = Math.round((BACKDROP_W * sh) / sw);
+    const m = BACKDROP_BLUR * 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = w + 2 * m;
+    canvas.height = h + 2 * m;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    // cover-fit the photo into the canvas (center crop)
+    const scale = Math.max(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+    const dw = img.naturalWidth * scale;
+    const dh = img.naturalHeight * scale;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.filter = `blur(${BACKDROP_BLUR}px)`;
+    ctx.drawImage(img, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+    ctx.filter = 'none';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)'; // dim so the photo itself stands out
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const url = canvas.toDataURL('image/jpeg', 0.9);
+    // decode up front so the backdrop is paintable by the stage raster
+    const pre = new Image();
+    pre.src = url;
+    if (pre.decode) await pre.decode().catch(() => {});
+    img.style.backgroundColor = '#000';
+    img.style.backgroundImage = `url(${url})`;
+    img.style.backgroundRepeat = 'no-repeat';
+    img.style.backgroundPosition = '50% 50%';
+    img.style.backgroundSize = `${(canvas.width / w) * 100}% ${(canvas.height / h) * 100}%`;
+  } catch {
+    /* no backdrop — plain black bars */
+  }
 }
 
 // Weighted shuffle (Efraimidis-Spirakis): each item gets key = rand^(1/weight),
