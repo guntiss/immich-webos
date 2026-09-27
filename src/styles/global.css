@@ -1843,9 +1843,10 @@ select {
   pointer-events: none;
   z-index: 0;
 }
-/* the reused <video>/<img> element mounted into a crossfade layer */
+/* the reused <video>/<img>/<canvas> element mounted into a crossfade layer */
 .wp-frame > video,
-.wp-frame > img {
+.wp-frame > img,
+.wp-frame > canvas {
   position: absolute;
   top: 0;
   right: 0;

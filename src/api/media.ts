@@ -6,7 +6,7 @@
 // used URL once the cap is exceeded. Full-size images / videos are one-off
 // loads the caller is responsible for revoking (revoke()).
 
-import { authedBlobUrl } from './internal-fetch';
+import { authedBlob, authedBlobUrl } from './internal-fetch';
 import { thumbnailUrl, personThumbnailUrl } from './client';
 
 // Does the browser rotate an <img> to match its EXIF orientation tag?
@@ -110,6 +110,11 @@ function evict(): void {
 // One-off loaders for fullscreen image / video. Caller must revoke().
 export async function loadBlobUrl(url: string): Promise<string> {
   return authedBlobUrl(url);
+}
+
+// One-off loader for bytes the caller decodes itself (no object URL to revoke).
+export async function loadBlob(url: string): Promise<Blob> {
+  return authedBlob(url);
 }
 
 export function revoke(objectUrl: string): void {

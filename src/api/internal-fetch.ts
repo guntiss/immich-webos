@@ -1,4 +1,4 @@
-// Fetch a binary endpoint with Bearer auth and return a blob: object URL.
+// Fetch a binary endpoint with Bearer auth and return a blob: object URL (or the Blob).
 import { getAuthHeaders } from '../auth/store';
 
 // A hung fetch (TCP stall, silently-dropped connection — common over flaky TV
@@ -17,6 +17,11 @@ import { getAuthHeaders } from '../auth/store';
 const canAbort = typeof AbortController !== 'undefined';
 
 export function authedBlobUrl(url: string, timeoutMs = 20000): Promise<string> {
+  return authedBlob(url, timeoutMs).then((blob) => URL.createObjectURL(blob));
+}
+
+// The bytes themselves, for callers that decode them directly (createImageBitmap).
+export function authedBlob(url: string, timeoutMs = 20000): Promise<Blob> {
   const ctrl = canAbort ? new AbortController() : null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -27,8 +32,7 @@ export function authedBlobUrl(url: string, timeoutMs = 20000): Promise<string> {
     if (ctrl) init.signal = ctrl.signal;
     const res = await fetch(url, init);
     if (!res.ok) throw new Error(`media ${res.status} for ${url}`);
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
+    return res.blob();
   })();
 
   const expiry = new Promise<never>((_resolve, reject) => {

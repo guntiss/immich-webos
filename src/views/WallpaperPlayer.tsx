@@ -1,8 +1,15 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { Asset } from '../api/assets';
-import { loadBlobUrl, revoke, appliesExifOrientation } from '../api/media';
-import { thumbnailUrl, videoStreamUrl, originalUrl, getAssetLocation, getAssetOrientation } from '../api/client';
+import { loadBlob, loadBlobUrl, loadThumb, revoke, appliesExifOrientation } from '../api/media';
+import {
+  thumbnailUrl,
+  videoStreamUrl,
+  originalUrl,
+  getAssetLocation,
+  getAssetOrientation,
+  getAssetPixels,
+} from '../api/client';
 import { Key, isBack, dirFromKey } from '../nav/keys';
 import { fetchStations, Station } from '../api/radio';
 import { keepAwake } from '../api/screensaver';
@@ -44,9 +51,25 @@ const GENRES = [
   { label: 'Classical', tag: 'classical' },
 ];
 const DEFAULT_GENRE = 'lofi'; // music starts on with this genre (photos mode)
-const WINDOW = 3; // stills prefetched ahead at original quality (TV bandwidth/RAM)
+const WINDOW = 2; // stills prefetched ahead (each holds a decoded bitmap in TV RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
 const PREBUFFER_S = 5; // seconds of the NEXT video to pre-download
+
+// Stills are decoded off the main thread into an ImageBitmap and shown on a
+// canvas where the TV supports it (see loadBitmapStill). Chromium 81+
+// (appliesExifOrientation) also orients ImageBitmaps from EXIF; older sets
+// keep the pre-decoded <img> path.
+const canBitmap = appliesExifOrientation && typeof createImageBitmap === 'function';
+// the screen in device pixels: originals up to this size are shown as they
+// are, bigger ones as the preview (a 24MP original is ~100MB decoded)
+const SCREEN_PX =
+  Math.round((window.innerWidth || 1920) * (window.devicePixelRatio || 1)) *
+  Math.round((window.innerHeight || 1080) * (window.devicePixelRatio || 1));
+
+// a still's display element: a decoded <img>, or a canvas holding its bitmap
+type Still = HTMLImageElement | HTMLCanvasElement;
+const stillSize = (s: Still): [number, number] =>
+  s instanceof HTMLCanvasElement ? [s.width, s.height] : [s.naturalWidth, s.naturalHeight];
 
 interface Cached {
   src: string;
@@ -60,7 +83,7 @@ interface Cached {
   decoded: boolean;
   error?: boolean; // failed to load — advance past it
   el?: HTMLVideoElement; // for video: the buffering, reusable element
-  img?: HTMLImageElement; // for still: the fully-decoded, reusable <img> element
+  img?: Still; // for still: the fully-decoded, reusable <img>/canvas element
 }
 
 interface Frame {
@@ -68,11 +91,12 @@ interface Frame {
   asset: Asset;
   src: string;
   el?: HTMLVideoElement;
-  img?: HTMLImageElement;
+  img?: Still;
 }
 
-// Fullscreen auto-advancing wallpaper slideshow. Stills crossfade every 8s at
-// original quality; videos buffer in chunks (progressive range streaming, like
+// Fullscreen auto-advancing wallpaper slideshow. Stills crossfade on a timer,
+// pre-decoded (original quality when it fits the screen, else the preview);
+// videos buffer in chunks (progressive range streaming, like
 // the grid) and play muted to the end, then advance. Navigation (auto or d-pad)
 // only moves to an item whose media is loaded — never onto a black/unready
 // frame. Loops forever. Owns its own key listener; the shell disables its
@@ -222,12 +246,12 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     });
   }, []);
 
-  // Mount a decoded <img> into the off-screen full-screen stage so the browser
+  // Mount a decoded still into the off-screen full-screen stage so the browser
   // lays it out and RASTERS it at display size, then resolves after two frames
   // (one to lay out, one to paint). The element is later reparented into the
   // visible layer already fitted — the transition can't hitch on a resize. If
   // the stage isn't mounted yet (first render), resolve immediately.
-  const fitOnStage = useCallback((img: HTMLImageElement, fit: 'cover' | 'contain'): Promise<void> => {
+  const fitOnStage = useCallback((img: Still, fit: 'cover' | 'contain'): Promise<void> => {
     return new Promise((res) => {
       const stage = stageRef.current;
       if (!stage) return res();
@@ -245,9 +269,10 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   // — a cover crop of a portrait on a 16:9 screen threw away over half the
   // photo. Everything else keeps the face-aimed full-screen cover crop.
   const prepStill = useCallback(
-    async (img: HTMLImageElement, id: string): Promise<void> => {
-      if (img.naturalHeight > img.naturalWidth) {
-        await applyBlurBackdrop(img);
+    async (img: Still, id: string): Promise<void> => {
+      const [w, h] = stillSize(img);
+      if (h > w) {
+        await applyBlurBackdrop(img, id);
         await fitOnStage(img, 'contain');
       } else {
         await aimAtFaces(img, id); // aim the cover crop BEFORE the stage raster
@@ -257,13 +282,50 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
     [fitOnStage],
   );
 
-  // Load one item into the cache. Stills: fetch original (HEIC/RAW fall back to
-  // the preview JPEG), ready once the blob resolves. Videos: a hidden <video>
-  // that buffers in chunks; ready on its first decoded frame (loadeddata).
-  const loadInto = useCallback(
+  // Load a still as a canvas holding its decoded pixels. The bytes are decoded
+  // OFF the main thread (createImageBitmap), then drawn into a 2D canvas the
+  // cache holds, so showing it needs no decode at all. An <img> is only really
+  // decoded when the compositor first draws it, and on the TV the main thread
+  // then stalls at its next frame until that decode is done (100-500ms) —
+  // every photo change froze the remote for that long. decode() doesn't
+  // prevent it there: webOS 10 refuses it whenever its decode budget is short
+  // and drops what it did decode before the photo comes up. A 2D canvas, not a
+  // bitmaprenderer one: that kept every photo's ~11MB bitmap alive until the
+  // next garbage collection, while a 2D canvas frees on teardown. The original
+  // is used when it's no bigger than the screen, else the preview (also the
+  // HEIC/RAW fallback).
+  const loadBitmapStill = useCallback(
+    async (a: Asset): Promise<Cached | null> => {
+      const fits = await getAssetPixels(a.id)
+        .then((px) => px > 0 && px <= SCREEN_PX)
+        .catch(() => false);
+      const preview = thumbnailUrl(a.id, 'preview');
+      for (const url of fits ? [originalUrl(a.id), preview] : [preview]) {
+        try {
+          const bmp = await createImageBitmap(await loadBlob(url));
+          const canvas = document.createElement('canvas');
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+          canvas.getContext('2d')!.drawImage(bmp, 0, 0);
+          bmp.close();
+          await prepStill(canvas, a.id);
+          return { src: url, isVideo: false, blob: false, ready: true, decoded: true, img: canvas };
+        } catch {
+          // undecodable (e.g. a HEIC/RAW original) — try the preview
+        }
+      }
+      return null;
+    },
+    [prepStill],
+  );
+
+  // Load one item. Stills: see loadBitmapStill; on older sets, fetch the
+  // original as a pre-decoded <img> (HEIC/RAW, or an original the TV won't
+  // pre-decode, fall back to the preview JPEG). Videos: a hidden <video> that
+  // buffers in chunks; ready on its first decoded frame (loadeddata). Caching
+  // + dedup live in loadInto below.
+  const loadFresh = useCallback(
     async (idx: number): Promise<Cached | null> => {
-      const hit = cache.current.get(idx);
-      if (hit) return hit;
       const a = assets[idx];
       if (!a) return null;
 
@@ -280,7 +342,6 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         el.setAttribute('playsinline', '');
         if (el.muted) el.setAttribute('muted', '');
         const e: Cached = { src: el.src, isVideo: true, blob: false, ready: false, decoded: false, el };
-        cache.current.set(idx, e);
         // NOTE: no aimAtFaces on videos. webOS composites <video> on its own
         // hardware plane; a non-center object-position breaks the hole-punch
         // and the video renders black (fine on desktop). Face boxes for videos
@@ -299,6 +360,8 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
         return e;
       }
 
+      if (canBitmap) return loadBitmapStill(a);
+
       try {
         // On sets that don't auto-apply EXIF orientation (Chromium < 81, i.e.
         // webOS 4.x), an original carrying an orientation tag paints rotated.
@@ -311,39 +374,88 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
             .then((o) => o !== 1)
             .catch(() => false); // unreachable info: keep today's behaviour
         }
-        const src = await loadBlobUrl(
-          bakeRotation ? thumbnailUrl(a.id, 'preview') : originalUrl(a.id),
-        );
-        // Build and fully DECODE the actual <img> element before caching, then
-        // reuse THAT element on screen (mounted via ref, like videos). A still
-        // is "loaded" only once its real element can paint instantly. Decoding a
-        // throwaway Image wasn't enough: the rendered element re-decoded async
-        // and the fade reached full opacity over a still-blank layer = black pop.
+        if (!bakeRotation && !skipOriginals) {
+          const src = await loadBlobUrl(originalUrl(a.id));
+          // Build and fully DECODE the actual <img> element before caching,
+          // then reuse THAT element on screen (mounted via ref, like videos). A
+          // still is "loaded" only once its real element can paint instantly.
+          // Decoding a throwaway Image wasn't enough: the rendered element
+          // re-decoded async and the fade reached full opacity over a
+          // still-blank layer = black pop.
+          let still: { img: HTMLImageElement; decoded: boolean };
+          try {
+            still = await decodeStill(src);
+          } catch (decodeErr) {
+            revoke(src); // undecodable original (e.g. HEIC/RAW) — drop it, try preview
+            throw decodeErr;
+          }
+          if (still.decoded) {
+            await prepStill(still.img, a.id); // lay out + raster at full-screen before it's eligible
+            return { src, isVideo: false, blob: true, ready: true, decoded: true, img: still.img };
+          }
+          // Loaded, but the TV won't pre-decode an image this big. Show the
+          // preview instead, and once that's happened twice stop downloading
+          // originals at all — each was megabytes fetched only to be dropped.
+          revoke(src);
+          if (++undecodableOriginals >= 2) skipOriginals = true;
+        }
+      } catch {
+        // undecodable original — the preview below
+      }
+      try {
+        const src = await loadBlobUrl(thumbnailUrl(a.id, 'preview'));
         let img: HTMLImageElement;
         try {
-          img = await decodeStill(src);
+          // preview is always a browser-decodable JPEG; a refused pre-decode
+          // just means the compositor decodes it when it's shown, not a skip
+          img = (await decodeStill(src)).img;
         } catch (decodeErr) {
-          revoke(src); // undecodable original (e.g. HEIC/RAW) — drop it, try preview
+          revoke(src);
           throw decodeErr;
         }
-        await prepStill(img, a.id); // lay out + raster at full-screen before it's eligible
-        const e: Cached = { src, isVideo: false, blob: true, ready: true, decoded: true, img };
-        cache.current.set(idx, e);
-        return e;
+        await prepStill(img, a.id);
+        return { src, isVideo: false, blob: true, ready: true, decoded: true, img };
       } catch {
-        try {
-          const src = await loadBlobUrl(thumbnailUrl(a.id, 'preview'));
-          const img = await decodeStill(src); // preview is always a browser-decodable JPEG
-          await prepStill(img, a.id);
-          const e: Cached = { src, isVideo: false, blob: true, ready: true, decoded: true, img };
-          cache.current.set(idx, e);
-          return e;
-        } catch {
-          return null;
-        }
+        return null;
       }
     },
-    [assets, bump, prepStill, mode, playEl],
+    [assets, bump, prepStill, loadBitmapStill, mode, playEl],
+  );
+
+  // Load one item into the cache. Concurrent calls for the same index share
+  // one load: the auto-advance retry asks again every 400ms while the next
+  // frame is still loading, and on the TV (where a load takes seconds) each
+  // retry used to start another full download + decode of the same photo.
+  // Loads started before the play order was rebuilt (clearCache) are dropped.
+  const inflight = useRef<Map<number, Promise<Cached | null>>>(new Map());
+  const cacheGen = useRef(0);
+  const loadInto = useCallback(
+    (idx: number): Promise<Cached | null> => {
+      const hit = cache.current.get(idx);
+      if (hit) return Promise.resolve(hit);
+      let p = inflight.current.get(idx);
+      if (!p) {
+        const gen = cacheGen.current;
+        p = loadFresh(idx).then(
+          (e) => {
+            if (cacheGen.current !== gen) {
+              if (e) teardown(e); // the order was rebuilt meanwhile: idx means another asset now
+              return null;
+            }
+            inflight.current.delete(idx);
+            if (e) cache.current.set(idx, e);
+            return e;
+          },
+          () => {
+            if (cacheGen.current === gen) inflight.current.delete(idx);
+            return null;
+          },
+        );
+        inflight.current.set(idx, p);
+      }
+      return p;
+    },
+    [loadFresh],
   );
 
   // Pre-download ~PREBUFFER_S of a NEIGHBOUR video, then back off so it doesn't
@@ -383,7 +495,11 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       e.el.load();
       e.el.remove();
     }
-    if (e.img) e.img.remove(); // pull the still off the stage / frame layer
+    if (e.img) {
+      e.img.remove(); // pull the still off the stage / frame layer
+      // free the canvas's pixels now rather than whenever it's collected
+      if (e.img instanceof HTMLCanvasElement) e.img.width = e.img.height = 0;
+    }
   };
 
   // Drop cached items outside the [i-2, i+WINDOW] window. Two behind (not one)
@@ -402,6 +518,8 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const clearCache = useCallback(() => {
     for (const [, e] of cache.current) teardown(e);
     cache.current.clear();
+    inflight.current.clear();
+    cacheGen.current++;
   }, []);
 
   // Keep `order` covering every asset. onNearEnd appends to the live list, so
@@ -599,21 +717,29 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
           if (++strikes >= ticks) { window.clearInterval(stallTimer); scheduleNext(0); }
         }, 2000);
       })
-      .catch(() => alive && scheduleNext(500));
+      .catch(() => alive && scheduleNext(500))
+      .then(prefetch);
 
-    // prefetch: all stills in the window, but only the NEXT video ahead (videos
-    // are heavy to buffer — one lookahead is enough to keep nav unblocked)
-    let vids = 0;
-    for (let k = i + 1; k <= i + WINDOW && k < assets.length; k++) {
-      void prefetchGeoFor(assets[k]);
-      if (assets[k].isVideo) {
-        if (vids < 1) {
-          const idx = k;
-          vids++;
-          void loadInto(idx).then((e) => { if (e?.el) capPrebuffer(idx, e); }); // ~5s prebuffer
+    // Prefetch the window ONE AT A TIME, nearest first, once the current frame
+    // is in: loading everything at once made the frames race each other for
+    // the TV's bandwidth and decoder, so the one needed next landed last. All
+    // stills in the window, but only the NEXT video ahead (videos are heavy to
+    // buffer — one lookahead is enough to keep nav unblocked). Stops when the
+    // show moves on; the next run resumes from cache.
+    async function prefetch() {
+      let vids = 0;
+      for (let k = i + 1; k <= i + WINDOW && k < assets.length; k++) {
+        if (!alive) return;
+        prefetchGeoFor(assets[k]);
+        if (assets[k].isVideo) {
+          if (vids < 1) {
+            vids++;
+            const e = await loadInto(k);
+            if (e?.el) capPrebuffer(k, e); // ~5s prebuffer
+          }
+        } else {
+          await loadInto(k);
         }
-      } else {
-        void loadInto(k);
       }
     }
     evict(i);
@@ -1103,17 +1229,43 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   );
 }
 
+// Originals this TV has loaded but refused to pre-decode (see decodeStill).
+// After two, skipOriginals sends every still straight to the preview for the
+// rest of the app's life instead of downloading originals only to drop them.
+let undecodableOriginals = 0;
+let skipOriginals = false;
+
 // Build an <img> element and fully decode its bitmap off-screen, resolving with
 // the SAME element once it's ready to paint. The caller caches and mounts this
-// exact element, so it never re-decodes on screen. A decode REJECTION is
-// propagated (not swallowed): the byte fetch can succeed while the format is
-// undecodable on the TV (HEIC/RAW original), and the caller must fall back to
-// the preview JPEG rather than cache a broken element that renders black.
-function decodeStill(src: string): Promise<HTMLImageElement> {
+// exact element, so it never re-decodes on screen (older sets only; newer ones
+// use loadBitmapStill). `decoded` is false when the bytes loaded but decode()
+// was refused: Chromium rejects it whenever its decode budget is short (on
+// webOS 10 always for images around 4K and up, intermittently even for a 1080p
+// JPEG) although the image paints fine, so it's kept and the compositor
+// decodes it when it's first shown. A real format
+// failure (HEIC/RAW original) loads with no natural size and still rejects: the
+// caller must fall back to the preview JPEG rather than cache a broken element
+// that renders black.
+async function decodeStill(src: string): Promise<{ img: HTMLImageElement; decoded: boolean }> {
   const img = new Image();
   img.src = src;
-  if (!img.decode) return Promise.resolve(img); // can't verify — assume paintable
-  return img.decode().then(() => img);
+  if (!img.decode) return { img, decoded: true }; // can't verify — assume paintable
+  try {
+    await img.decode();
+    return { img, decoded: true };
+  } catch (err) {
+    if (img.naturalWidth > 0) return { img, decoded: false };
+    throw err;
+  }
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
 }
 
 // Paint a blurred, dimmed, screen-filling copy of a still as the <img>'s own
@@ -1124,10 +1276,16 @@ function decodeStill(src: string): Promise<HTMLImageElement> {
 // softness. The canvas overshoots the screen by a margin that is scaled
 // off-screen, hiding the blur's dark edge falloff. Best-effort: on any failure
 // (e.g. a tainted canvas) the bars just stay black.
+//
+// Drawn from the asset's small grid thumbnail, not the shown image: drawing
+// the full photo decoded it on the main thread and read the canvas back from
+// the busy GPU, which froze the UI for up to a second per portrait on the TV.
+// A CPU canvas (willReadFrequently) keeps the readback off the GPU entirely.
 const BACKDROP_W = 192; // backdrop canvas width; height follows the screen aspect
 const BACKDROP_BLUR = 6; // px at canvas scale (~60px at 1080p)
-async function applyBlurBackdrop(img: HTMLImageElement): Promise<void> {
+async function applyBlurBackdrop(img: Still, id: string): Promise<void> {
   try {
+    const thumb = await loadImage(await loadThumb(id));
     const sw = window.innerWidth || 1920;
     const sh = window.innerHeight || 1080;
     const w = BACKDROP_W;
@@ -1136,15 +1294,15 @@ async function applyBlurBackdrop(img: HTMLImageElement): Promise<void> {
     const canvas = document.createElement('canvas');
     canvas.width = w + 2 * m;
     canvas.height = h + 2 * m;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
     // cover-fit the photo into the canvas (center crop)
-    const scale = Math.max(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
-    const dw = img.naturalWidth * scale;
-    const dh = img.naturalHeight * scale;
+    const scale = Math.max(canvas.width / thumb.naturalWidth, canvas.height / thumb.naturalHeight);
+    const dw = thumb.naturalWidth * scale;
+    const dh = thumb.naturalHeight * scale;
     ctx.imageSmoothingQuality = 'high';
     ctx.filter = `blur(${BACKDROP_BLUR}px)`;
-    ctx.drawImage(img, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+    ctx.drawImage(thumb, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
     ctx.filter = 'none';
     ctx.fillStyle = 'rgba(0, 0, 0, 0.35)'; // dim so the photo itself stands out
     ctx.fillRect(0, 0, canvas.width, canvas.height);

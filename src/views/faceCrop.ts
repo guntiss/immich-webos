@@ -43,16 +43,18 @@ export function faceObjectPosition(
   return `${px.toFixed(2)}% ${py.toFixed(2)}%`;
 }
 
-// Fetch the asset's detected faces and aim the <img>'s cover crop at them.
-// No-op (default center crop) when there are none. Container size defaults to
-// the element's own client box, falling back to the viewport.
-export async function aimAtFaces(el: HTMLImageElement, id: string): Promise<void> {
+// Fetch the asset's detected faces and aim the element's cover crop at them
+// (an <img>, or a canvas holding the decoded photo). No-op (default center
+// crop) when there are none. Container size defaults to the element's own
+// client box, falling back to the viewport.
+export async function aimAtFaces(el: HTMLImageElement | HTMLCanvasElement, id: string): Promise<void> {
   const src = el.getAttribute('src'); // guard: layers are reused across previews
   const faces = await getAssetFaces(id); // never throws; [] on failure
   if (el.getAttribute('src') !== src) return; // element moved on — a newer load owns it
   const cw = el.clientWidth || undefined;
   const ch = el.clientHeight || undefined;
-  const pos = faceObjectPosition(el.naturalWidth, el.naturalHeight, faces, cw, ch);
+  const [w, h] = el instanceof HTMLCanvasElement ? [el.width, el.height] : [el.naturalWidth, el.naturalHeight];
+  const pos = faceObjectPosition(w, h, faces, cw, ch);
   // always assign — reused <img> layers (hero carousel) must reset to center
   // when the next preview has no face crop, not keep the prior one's position
   el.style.objectPosition = pos ?? '50% 50%';

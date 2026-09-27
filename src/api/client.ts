@@ -493,15 +493,35 @@ interface AssetInfo {
   // Immich returns it as a string; anything other than 1 means the pixels are
   // stored rotated or mirrored relative to how they should be displayed.
   orientation: number;
+  // Original's pixel count (width x height), 0 when Immich doesn't know it.
+  pixels: number;
 }
 
-const infoCache = new Map<string, AssetInfo>();
+// Promises, not results, so concurrent lookups of one asset (the slideshow's
+// caption prefetch and its shown-photo caption) share a single request. A
+// failed lookup is dropped so a later call can retry.
+const infoCache = new Map<string, Promise<AssetInfo>>();
 
-async function getAssetInfo(id: string): Promise<AssetInfo> {
-  const hit = infoCache.get(id);
-  if (hit) return hit;
+function getAssetInfo(id: string): Promise<AssetInfo> {
+  let p = infoCache.get(id);
+  if (!p) {
+    p = fetchAssetInfo(id);
+    p.catch(() => infoCache.delete(id));
+    infoCache.set(id, p);
+  }
+  return p;
+}
+
+async function fetchAssetInfo(id: string): Promise<AssetInfo> {
   const a = await jsonReq<{
-    exifInfo?: { city?: string; state?: string; country?: string; orientation?: string | null };
+    exifInfo?: {
+      city?: string;
+      state?: string;
+      country?: string;
+      orientation?: string | null;
+      exifImageWidth?: number | null;
+      exifImageHeight?: number | null;
+    };
   }>(`/assets/${id}`);
   const raw = parseInt(a.exifInfo?.orientation ?? '', 10);
   const info: AssetInfo = {
@@ -514,8 +534,8 @@ async function getAssetInfo(id: string): Promise<AssetInfo> {
     // oriented photo via the preview costs sharpness, showing a rotated one
     // costs the shot.
     orientation: a.exifInfo?.orientation == null ? 1 : isNaN(raw) ? 0 : raw,
+    pixels: (a.exifInfo?.exifImageWidth || 0) * (a.exifInfo?.exifImageHeight || 0),
   };
-  infoCache.set(id, info);
   return info;
 }
 
@@ -525,6 +545,10 @@ export async function getAssetLocation(id: string): Promise<AssetLocation> {
 
 export async function getAssetOrientation(id: string): Promise<number> {
   return (await getAssetInfo(id)).orientation;
+}
+
+export async function getAssetPixels(id: string): Promise<number> {
+  return (await getAssetInfo(id)).pixels;
 }
 
 // Detected-face bounding box, normalized to 0..1 of the image. Immich reports
