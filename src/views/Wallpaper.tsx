@@ -191,7 +191,7 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
     <div class="wp">
       <header class="wp-header">
         <div class="wp-header-text">
-          <h1 class="album-title">Wallpaper</h1>
+          <h1 class="album-title">Slideshow</h1>
           {albums.length > 0 && (
             <div class="album-subtitle">
               {chosen.length
@@ -239,7 +239,7 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
       ) : fetched ? (
         <EmptyState
           title="No albums yet"
-          hint="Create an album in the Immich mobile or web app, then pick it here to use as wallpaper."
+          hint="Create an album in the Immich mobile or web app, then pick it here for the slideshow."
         />
       ) : (
         <div class="msg">Loading…</div>
@@ -256,7 +256,7 @@ export function Wallpaper({ backRef, onFullscreen }: Props) {
         <div class="wp-prep">
           <EmptyState
             title="No photos to show"
-            hint="The selected albums have no photos. Pick other albums to use as wallpaper."
+            hint="The selected albums have no photos. Pick other albums for the slideshow."
           />
         </div>
       )}

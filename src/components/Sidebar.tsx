@@ -20,7 +20,7 @@ const ITEMS: Item[] = [
   { route: 'search', label: 'Search', icon: 'search' },
   { route: 'albums', label: 'Albums', icon: 'albums' },
   { route: 'favorites', label: 'Favorites', icon: 'favorite' },
-  { route: 'wallpaper', label: 'Wallpaper', icon: 'wallpaper' },
+  { route: 'wallpaper', label: 'Slideshow', icon: 'wallpaper' },
 ];
 
 interface Props {
