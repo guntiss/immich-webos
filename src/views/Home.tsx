@@ -21,6 +21,7 @@ import {
   setOverlayHidden,
 } from '../settings';
 import { Asset } from '../api/assets';
+import { clearStoredThumbs } from '../api/thumbStore';
 import { PhotoGrid, PlaceOf } from '../components/PhotoGrid';
 import { Icon } from '../components/Icon';
 import { IconName } from '../components/icons';
@@ -415,6 +416,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const doLogout = async () => {
     setConfirmLogout(false);
     await logout();
+    await clearStoredThumbs();
     clearSession();
     onLogout();
   };

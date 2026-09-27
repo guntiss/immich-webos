@@ -3,11 +3,13 @@
 //
 // Object URLs hold the blob in memory until revoked. TVs have little RAM, so
 // thumbnails go through a bounded LRU cache that revokes the least-recently
-// used URL once the cap is exceeded. Full-size images / videos are one-off
-// loads the caller is responsible for revoking (revoke()).
+// used URL once the cap is exceeded. Asset thumbnails are also kept on disk
+// (thumbStore) so they're there again after a restart. Full-size images /
+// videos are one-off loads the caller is responsible for revoking (revoke()).
 
 import { authedBlob, authedBlobUrl } from './internal-fetch';
 import { thumbnailUrl, personThumbnailUrl } from './client';
+import { readThumb, storeThumb } from './thumbStore';
 
 // Does the browser rotate an <img> to match its EXIF orientation tag?
 //
@@ -46,21 +48,43 @@ const inflight = new Map<string, Promise<string>>();
 // the response, and mid-scroll that's slow. At 6 a held-down d-pad drained the
 // queue at ~20 thumbs/s (each fetch ~25ms, the network mostly idle) and left
 // most of the screen grey; more in flight lets the network stack keep going.
-const MAX_CONCURRENT = 16;
-let active = 0;
-const queue: Array<() => void> = [];
+const fetchSlot = gate(16);
 
-function runNext(): void {
-  if (active >= MAX_CONCURRENT) return;
-  const job = queue.shift();
-  if (!job) return;
-  active++;
-  job();
+// Disk reads get their own, much tighter gate. On launch the whole prefetch
+// window asks at once, and 250 parallel Cache Storage reads made the first 16
+// (the visible ones) wait ~170-320ms on the TV; 8 at a time answered those in
+// ~30ms and the batch finished no later.
+const readSlot = gate(8);
+
+// Runs at most `limit` jobs at once and queues the rest in order.
+function gate(limit: number): <T>(job: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const runNext = () => {
+    if (active >= limit) return;
+    const job = queue.shift();
+    if (!job) return;
+    active++;
+    job();
+  };
+  return (job) =>
+    new Promise((resolve, reject) => {
+      queue.push(() => {
+        const release = () => {
+          active--;
+          runNext();
+        };
+        job().then(resolve, reject).then(release);
+      });
+      runNext();
+    });
 }
 
 // Core cached loader: dedups, LRU-caches, and rate-limits any authed image URL.
 // `key` namespaces the cache so an asset thumb and a person thumb never collide.
-async function loadCached(key: string, url: string): Promise<string> {
+// `stored` also keeps the bytes on disk: tried before the network, and written
+// after a fetch, checked against its `version` (see thumbStore).
+async function loadCached(key: string, url: string, stored?: { version?: string | null }): Promise<string> {
   const hit = cache.get(key);
   if (hit) {
     // refresh LRU position
@@ -71,29 +95,32 @@ async function loadCached(key: string, url: string): Promise<string> {
   const pending = inflight.get(key);
   if (pending) return pending;
 
-  const p = new Promise<string>((resolve, reject) => {
-    queue.push(() => {
-      authedBlobUrl(url)
-        .then((u) => {
-          cache.set(key, u);
-          evict();
-          resolve(u);
-        })
-        .catch(reject)
-        .finally(() => {
-          inflight.delete(key);
-          active--;
-          runNext();
-        });
+  const version = stored?.version;
+  const p = (stored ? readSlot(() => readThumb(url, version)) : Promise.resolve(null))
+    .then((disk) =>
+      disk ||
+      fetchSlot(() => authedBlob(url)).then((blob) => {
+        if (stored) storeThumb(url, blob, version);
+        return blob;
+      }),
+    )
+    .then((blob) => {
+      const u = URL.createObjectURL(blob);
+      cache.set(key, u);
+      evict();
+      return u;
     });
-    runNext();
-  });
+  const settle = () => {
+    inflight.delete(key);
+  };
+  p.then(settle, settle);
   inflight.set(key, p);
   return p;
 }
 
-export async function loadThumb(id: string): Promise<string> {
-  return loadCached(id, thumbnailUrl(id, 'thumbnail'));
+// `thumbhash`, when the caller has it, rejects a stale thumbnail kept on disk.
+export async function loadThumb(id: string, thumbhash?: string | null): Promise<string> {
+  return loadCached(id, thumbnailUrl(id, 'thumbnail'), { version: thumbhash });
 }
 
 // Face-cluster thumbnail for the search People row.

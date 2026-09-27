@@ -264,6 +264,7 @@ export function Search({ onOpen }: { onOpen: (assets: Asset[], index: number) =>
                     <Thumb
                       key={a.id}
                       assetId={a.id}
+                      thumbhash={a.thumbhash}
                       isVideo={a.isVideo}
                       duration={a.duration}
                       width={a.w}

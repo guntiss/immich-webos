@@ -5,6 +5,8 @@ import { Icon } from './Icon';
 
 interface Props {
   assetId: string;
+  // Lets the loader tell a thumbnail kept on disk is out of date.
+  thumbhash?: string | null;
   isVideo: boolean;
   duration?: number | string | null;
   isLive?: boolean;
@@ -16,7 +18,7 @@ interface Props {
 // Single justified-grid cell sized to explicit width/height (aspect preserved
 // by the parent's justified-row math). Lazily fetches its thumbnail blob when
 // near the viewport. Marked focusable for remote nav.
-export function Thumb({ assetId, isVideo, duration, isLive, width, height, onSelect }: Props) {
+export function Thumb({ assetId, thumbhash, isVideo, duration, isLive, width, height, onSelect }: Props) {
   const ref = useRef<HTMLButtonElement>(null);
   const [src, setSrc] = useState<string | null>(null);
   const [near, setNear] = useState(false);
@@ -48,7 +50,7 @@ export function Thumb({ assetId, isVideo, duration, isLive, width, height, onSel
     let alive = true;
     let timer = 0;
     const attempt = (n: number) => {
-      loadThumb(assetId)
+      loadThumb(assetId, thumbhash)
         .then((url) => alive && setSrc(url))
         .catch(() => {
           if (alive && n < 4) timer = window.setTimeout(() => attempt(n + 1), 1000 * (n + 1));
@@ -59,7 +61,7 @@ export function Thumb({ assetId, isVideo, duration, isLive, width, height, onSel
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [near, assetId]);
+  }, [near, assetId, thumbhash]);
 
   return (
     <button

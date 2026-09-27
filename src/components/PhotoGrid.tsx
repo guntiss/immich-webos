@@ -296,6 +296,7 @@ const BucketSection = memo(function BucketSection({
                 <Thumb
                   key={a.id}
                   assetId={a.id}
+                  thumbhash={a.thumbhash}
                   isVideo={a.isVideo}
                   duration={a.duration}
                   isLive={!!a.livePhotoVideoId}
