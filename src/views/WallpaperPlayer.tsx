@@ -1464,13 +1464,15 @@ export function WallpaperPlayer({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const code = e.keyCode;
-      poke();
       const dir = dirFromKey(code);
       // viewer on a video: OK and the media keys drive the clip
       const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
       // the seek group needs a clip that loaded (a failed one shows no transport)
       const seekable = !!vid && !cache.current.get(iRef.current)?.error;
       const g = groupRef.current;
+      // Stepping to the previous/next item leaves the controls as they are
+      // (hidden ones stay hidden); every other key brings them up.
+      if (!(g === 'nav' && zoomRef.current <= 1 && (dir === 'left' || dir === 'right'))) poke();
 
       // Back drops a picked group back to previous/next first, then closes
       if (isBack(code)) {
