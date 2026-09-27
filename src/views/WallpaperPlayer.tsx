@@ -69,6 +69,7 @@ interface Props {
 // options bar along the bottom edge). The selected group's controls are ringed.
 // Up past the top group ('nav') or Down past the bottom one ('bar') puts the
 // controls away, and either key brings hidden controls back up on 'nav'.
+// On a video, 'nav' steps on the key's release, and holding it seeks the clip.
 type Group = 'nav' | 'seek' | 'bar';
 
 const HIDE_MS = 3000;
@@ -89,6 +90,10 @@ const DEFAULT_MS = SPEEDS[0].ms; // dwell per still (3s)
 const WINDOW = 2; // stills prefetched ahead (each holds a decoded bitmap in TV RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
 const SEEK_STEP = 10; // seconds
+const HOLD_MS = 400; // Left/Right down this long on a video seeks it instead of stepping on
+const HOLD_SEEK_MS = 250; // held: one seek step this often, at most (each waits for the last)
+const HOLD_SEEK_STEPS = 20; // held: steps to cross a whole clip (5s at best), each at least 1s
+const HOLD_END_GAP = 0.1; // held off a clip's end: it waits this far short of it (s)
 const ZOOM_STEP = 1.2; // scale multiplier per scroll-wheel tick
 const MAX_ZOOM = 6;
 const PAN_KEY_STEP = 120; // px the d-pad nudges a zoomed photo
@@ -115,6 +120,14 @@ interface Box {
   top: number;
   width: number;
   height: number;
+}
+// Left/Right down on a viewer video, until its release (see pressRef)
+interface Press {
+  code: number; // the key
+  dir: number; // -1 previous / back, 1 next / forward
+  held: boolean; // down past HOLD_MS: seeking, not stepping
+  timer: number; // the hold's pending start, then its next seek step
+  ended?: boolean; // the clip is over (held off its end, or it ended): on the release
 }
 // the photo growing out of / shrinking back into its grid cell: laid out at
 // `box`, it animates (`go`) from the `from` transform to the `to` one
@@ -302,6 +315,19 @@ export function WallpaperPlayer({
   const [progress, setProgress] = useState({ cur: 0, dur: 0, buffered: 0 });
   const seekRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+  // Left/Right down on a video with 'nav' picked: a tap steps to the previous/
+  // next item on its release, a hold (HOLD_MS) seeks the clip until let go.
+  const pressRef = useRef<Press | null>(null);
+  const dropPress = useCallback(() => {
+    const p = pressRef.current;
+    if (p) window.clearTimeout(p.timer);
+    pressRef.current = null;
+    return p;
+  }, []);
+  // a new item (the show moving on) forgets a press begun on the last one
+  useEffect(() => {
+    dropPress();
+  }, [i, dropPress]);
   // zoom scales the still on screen; pan offsets it (px). Both reset per photo.
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -359,6 +385,13 @@ export function WallpaperPlayer({
   const advanceRef = useRef<() => void>(() => {});
   // latest exit fn, for the same reason
   const exitRef = useRef<() => void>(() => {});
+  // The current clip is over: the show moves on; the viewer, browsing, goes
+  // back to the grid, as if Back were pressed; the paused slideshow holds it.
+  const clipEnded = useCallback(() => {
+    if (!pausedRef.current) advanceRef.current();
+    else if (viewer) exitRef.current();
+    else vidHoldRef.current = true;
+  }, [viewer]);
 
   // The background music can't play alongside a clip on webOS (see duckMusic),
   // so each clip ducks it before playing and hands it back once it ends or is
@@ -656,11 +689,9 @@ export function WallpaperPlayer({
         el.addEventListener('loadeddata', () => { e.decoded = true; bump(); }, { once: true });
         el.addEventListener('ended', () => {
           if (iRef.current !== idx) return;
-          if (!pausedRef.current) advanceRef.current();
-          // viewer, browsing: a finished clip goes back to the grid, as if Back
-          // were pressed
-          else if (viewer) exitRef.current();
-          else vidHoldRef.current = true;
+          // Left/Right still down: over on the release instead
+          if (pressRef.current) pressRef.current.ended = true;
+          else clipEnded();
         });
         el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
         el.addEventListener('ended', () => unduck(el));
@@ -737,7 +768,7 @@ export function WallpaperPlayer({
         return null;
       }
     },
-    [assets, bump, prepStill, loadBitmapStill, viewer, playEl, wantPlay, switchSrc, unduck, duckForLoad],
+    [assets, bump, prepStill, loadBitmapStill, viewer, playEl, wantPlay, switchSrc, unduck, duckForLoad, clipEnded],
   );
 
   // Load one item into the cache. Concurrent calls for the same index share
@@ -1147,6 +1178,7 @@ export function WallpaperPlayer({
       window.clearTimeout(advanceTimer.current);
       window.clearTimeout(hideTimer.current);
       window.clearTimeout(motionFadeTimer.current);
+      dropPress();
       for (const e of held.values()) teardown(e);
       held.clear();
       seen.flush();
@@ -1672,6 +1704,15 @@ export function WallpaperPlayer({
         return;
       }
       const code = e.keyCode;
+      // a Left/Right press on a video waiting for its release: the key
+      // repeating while held is swallowed, any other key forgets the press
+      if (pressRef.current) {
+        if (pressRef.current.code === code) {
+          e.preventDefault();
+          return;
+        }
+        dropPress();
+      }
       const dir = dirFromKey(code);
       // viewer on a video: OK and the media keys drive the clip
       const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
@@ -1766,7 +1807,8 @@ export function WallpaperPlayer({
       }
 
       // viewer on a video: OK plays/pauses the clip; Left/Right step to the
-      // previous/next item, or jump the clip with the seek group picked
+      // previous/next item (on the release, as holding them seeks the clip:
+      // see pressRef), or jump the clip with the seek group picked
       if (vid) {
         if (code === Key.Enter || code === Key.PlayPause) {
           e.preventDefault();
@@ -1784,12 +1826,44 @@ export function WallpaperPlayer({
         } else if (code === Key.Rewind) {
           e.preventDefault();
           seek(-SEEK_STEP);
-        } else if (dir === 'left') {
+        } else if (step) {
           e.preventDefault();
-          g === 'seek' ? seek(-SEEK_STEP) : advance(-1, true);
-        } else if (dir === 'right') {
-          e.preventDefault();
-          g === 'seek' ? seek(SEEK_STEP) : advance(1, true);
+          const d = dir === 'left' ? -1 : 1;
+          if (g === 'seek') seek(d * SEEK_STEP);
+          else if (!seekable) advance(d, true);
+          else {
+            const press: Press = { code, dir: d, held: false, timer: 0 };
+            pressRef.current = press;
+            const tick = () => {
+              const v = cache.current.get(iRef.current)?.el;
+              if (!v || pressRef.current !== press) return;
+              // the TV drops a seek made while the last one is still going
+              // (and shows no frame until they stop): wait for it
+              if (v.seeking) {
+                press.timer = window.setTimeout(tick, 50);
+                return;
+              }
+              const by = d * Math.max(1, (v.duration || 0) / HOLD_SEEK_STEPS);
+              poke();
+              if (d > 0 && v.currentTime + by >= v.duration) {
+                // held off the end: the clip is over. It waits paused by its
+                // end (vidHoldRef: re-renders don't start it over) and ends
+                // on the release (not on the very end: it may end on its own)
+                vidHoldRef.current = true;
+                v.pause();
+                seek(Math.max(0, v.duration - HOLD_END_GAP - v.currentTime));
+                press.ended = true;
+                return;
+              }
+              seek(by);
+              // at the start: it plays on from there
+              if (v.currentTime > 0) press.timer = window.setTimeout(tick, HOLD_SEEK_MS);
+            };
+            press.timer = window.setTimeout(() => {
+              press.held = true;
+              tick();
+            }, HOLD_MS);
+          }
         }
         return;
       }
@@ -1811,11 +1885,32 @@ export function WallpaperPlayer({
         setPlaying(false);
       }
     };
+    // Left/Right let go on a video: a tap steps to the previous/next item; a
+    // hold that left the clip over ends it now
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (pressRef.current?.code !== e.keyCode) return;
+      e.preventDefault();
+      const p = dropPress()!;
+      if (!p.held) advance(p.dir, true);
+      else if (p.ended) clipEnded();
+    };
+    // the app losing focus mid-press may never see the release
+    const onBlur = () => dropPress();
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onBlur);
+    };
   }, [
     advance,
     exit,
+    dropPress,
+    clipEnded,
     poke,
     setPlaying,
     selectGroup,
