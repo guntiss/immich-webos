@@ -69,8 +69,6 @@ type Group = 'nav' | 'seek' | 'bar';
 const HIDE_MS = 3000;
 const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
 const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this long idle
-const CAPTION_DELAY_MS = 1000; // location/date animate in this long after a transition
-const CAPTION_BROWSE_MS = 250; // ...or this long while paused and stepping by hand
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
 const SPEEDS = [
@@ -220,8 +218,6 @@ export function WallpaperPlayer({
   // setting them separately re-keyed the caption twice (date now, place later)
   // and it animated in twice. Commit both once the lookup resolves.
   const [meta, setMeta] = useState<{ loc: string | null; date: string }>({ loc: null, date: '' });
-  const metaRef = useRef<{ loc: string | null; date: string }>({ loc: null, date: '' });
-  metaRef.current = meta;
   // pre-geocoded results keyed by asset id so transitions can compare old vs new
   // meta before the new image shows, clearing the caption only when it changes.
   const geoCache = useRef(new Map<string, { loc: string | null; date: string }>());
@@ -1033,51 +1029,36 @@ export function WallpaperPlayer({
     }
   }, [layers, showA]);
 
-  // Reverse-geocode the SHOWN asset and commit place+date together, once BOTH
-  // the lookup has resolved AND a short beat (CAPTION_DELAY_MS) has passed since
-  // the image was revealed. Keying on the shown asset (not the target index)
-  // guarantees the caption never fades in before its image is loaded. Committing
-  // the pair as one metaKey means the caption is keyed on its content: identical
-  // place+date reuses the DOM node and does NOT re-fade; only a genuine change
-  // remounts and fades in.
+  // Caption for the SHOWN asset, switched the moment its image is revealed.
+  // Keying on the shown asset (not the target index) guarantees the caption
+  // never fades in before its image is loaded. Place and date are committed as
+  // one metaKey, so the caption is keyed on its content: identical place+date
+  // reuses the DOM node and does NOT re-fade; only a genuine change remounts
+  // and fades in. Neighbours are pre-geocoded (prefetchGeoFor), so this is
+  // normally a cache hit.
   useEffect(() => {
     if (!shownAsset) return;
-    let alive = true;
-    const date = fmtDate(shownAsset.createdAt);
-    const delay = pausedRef.current ? CAPTION_BROWSE_MS : CAPTION_DELAY_MS;
-
     const cached = geoCache.current.get(shownAsset.id);
     if (cached) {
-      // We already know the new meta. Clear the old caption now only when the
-      // content is actually changing — same place/date stays visible throughout.
-      const newKey = `${cached.loc ?? ''}|${cached.date}`;
-      const curKey = `${metaRef.current.loc ?? ''}|${metaRef.current.date}`;
-      if (newKey !== curKey) setMeta({ loc: null, date: '' });
-      const t = window.setTimeout(() => { if (alive) setMeta(cached); }, delay);
-      return () => { alive = false; window.clearTimeout(t); };
+      setMeta(cached);
+      return;
     }
-
-    // Not pre-geocoded yet — clear immediately (unknown whether same or different)
-    // and run the lookup now, caching the result for future transitions.
+    // Not pre-geocoded yet: clear the old caption and commit place + date
+    // together once the lookup resolves (the date alone first would fade in
+    // twice), caching the result for later.
+    let alive = true;
+    const date = fmtDate(shownAsset.createdAt);
     setMeta({ loc: null, date: '' });
-    let loc: string | null = null;
-    let resolved = false;
-    let delayed = false;
-    const commit = () => {
-      if (alive && resolved && delayed) {
+    getAssetLocation(shownAsset.id)
+      .then((r) => fmtPlace(r))
+      .catch(() => null)
+      .then((loc) => {
         const result = { loc, date };
         geoCache.current.set(shownAsset.id, result);
-        setMeta(result);
-      }
-    };
-    const t = window.setTimeout(() => { delayed = true; commit(); }, delay);
-    getAssetLocation(shownAsset.id)
-      .then((r) => { loc = fmtPlace(r); })
-      .catch(() => { loc = null; })
-      .finally(() => { resolved = true; commit(); });
+        if (alive) setMeta(result);
+      });
     return () => {
       alive = false;
-      window.clearTimeout(t);
     };
   }, [shownAsset?.id]);
 
