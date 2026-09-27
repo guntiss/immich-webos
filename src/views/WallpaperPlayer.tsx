@@ -871,6 +871,18 @@ export function WallpaperPlayer({
   );
   advanceRef.current = () => scheduleNext(0);
 
+  // A still's dwell: arm its advance timer and restart the edge line that
+  // shows it running out (the viewer's slideshow). `n` re-keys the line so
+  // every (re)start fills it from empty.
+  const [dwell, setDwell] = useState({ n: 0, ms: 0 });
+  const dwellOn = useCallback(
+    (ms: number) => {
+      scheduleNext(ms);
+      setDwell((d) => ({ n: d.n + 1, ms }));
+    },
+    [scheduleNext],
+  );
+
   const prefetchGeoFor = useCallback((a: Asset) => {
     if (geoCache.current.has(a.id)) return;
     const date = fmtDate(a.createdAt);
@@ -904,7 +916,7 @@ export function WallpaperPlayer({
         }
         if (!e.isVideo) {
           showFrame({ key, asset, src: e.src, img: e.img });
-          scheduleNext(intervalRef.current); // stills auto-advance on a timer
+          dwellOn(intervalRef.current); // stills auto-advance on a timer
           return;
         }
         // Video: promote to full buffering now that it's current, and only
@@ -1091,14 +1103,14 @@ export function WallpaperPlayer({
         playEl(cur.el);
       }
     } else {
-      scheduleNext(intervalRef.current);
+      dwellOn(intervalRef.current);
     }
-  }, [paused, scheduleNext, playEl]);
+  }, [paused, scheduleNext, dwellOn, playEl]);
 
   // changing the speed while a still is showing restarts its timer at the new rate
   useEffect(() => {
     if (paused) return;
-    if (!assets[iRef.current]?.isVideo) scheduleNext(intervalMs);
+    if (!assets[iRef.current]?.isVideo) dwellOn(intervalMs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs]);
 
@@ -1781,6 +1793,16 @@ export function WallpaperPlayer({
             <div class="wp-edge-fill" style={{ width: `${pct}%` }}>
               <span class="wp-edge-knob" />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* the viewer's slideshow: a photo's dwell running out along the same
+          line (not a seek bar, so the pointer passes through it) */}
+      {viewer && !paused && !asset.isVideo && dwell.n > 0 && (
+        <div class="wp-edge-progress dwell">
+          <div class="wp-edge-track">
+            <div class="wp-edge-fill" key={dwell.n} style={{ animationDuration: `${dwell.ms}ms` }} />
           </div>
         </div>
       )}
