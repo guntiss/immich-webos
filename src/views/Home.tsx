@@ -37,6 +37,7 @@ interface Viewer {
   assets: Asset[];
   index: number;
   seen: SeenStore; // what its slideshow has shown, for shuffle
+  canShuffle: boolean; // opened from an album: offers Shuffle
 }
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
@@ -193,8 +194,13 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     setTimeout(() => focusFirstContent(), 0);
   }, [route, album]);
 
+  // Shuffle is only offered inside an album; the all-photos views (timeline,
+  // favorites, search) browse in their own order.
   const openViewer = useCallback((assets: Asset[], index: number) => {
-    setViewer({ assets, index, seen: memorySeen() });
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: false });
+  }, []);
+  const openAlbumViewer = useCallback((assets: Asset[], index: number) => {
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: true });
   }, []);
 
   // update the live asset list in the viewer as the grid loads more buckets
@@ -340,6 +346,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           assets={viewer.assets}
           startIndex={viewer.index}
           seen={viewer.seen}
+          canShuffle={viewer.canShuffle}
           onExit={closeViewer}
           onNearEnd={handleNearEnd}
         />
@@ -436,7 +443,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
               <PhotoGrid
                 loadBuckets={loadAlbumBuckets}
                 loadBucket={loadAlbumBucket}
-                onOpen={openViewer}
+                onOpen={openAlbumViewer}
                 loadNextUnloaded={loadNextRef}
                 onAssetsChange={handleAssetsChange}
               />

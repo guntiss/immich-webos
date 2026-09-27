@@ -1914,7 +1914,7 @@ select {
   color: #0a0a0a;
   background: var(--immich-dark-primary);
 }
-/* labeled pill button (Play/Pause, video quality) */
+/* labeled pill button (Slideshow, video quality) */
 .wp-text-btn {
   display: inline-flex;
   align-items: center;
@@ -1970,16 +1970,12 @@ select {
   outline: none;
   box-shadow: 0 0 0 3px var(--immich-dark-primary);
 }
-.wp-player-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 16px;
-  font-weight: 600;
+/* The control group Left/Right drive (picked with Up/Down, see Group in
+   WallpaperPlayer) is ringed: the previous/next arrows, or the video's jump
+   and play buttons. The options bar rings its focused button above. */
+.wp-player.group-nav .fs-arrow,
+.wp-player.group-seek .wp-transport .fs-btn {
+  border-color: var(--immich-dark-primary);
 }
 .wp-player-count {
   position: absolute;

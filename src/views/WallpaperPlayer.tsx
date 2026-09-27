@@ -31,7 +31,7 @@ interface Props {
   // 'photos': the Slideshow page's show — shuffled, auto-advancing, landscape
   // stills face-cropped to fill the screen.
   // 'viewer': the photo viewer opened from a grid — starts PAUSED on
-  // `startIndex` in list order and only runs as a slideshow once Play is
+  // `startIndex` in list order and only runs as a slideshow once Slideshow is
   // pressed. Every photo is shown whole over a blurred fill, photos zoom with
   // the scroll wheel, Live Photos play their motion, and videos play with their
   // own sound and a seek bar. Any clip playing, in either mode, fades the
@@ -45,13 +45,23 @@ interface Props {
   // called when the user toggles shuffle. The feed randomizes its remaining
   // bucket order so shuffle spans the whole source, not just the loaded page.
   onShuffleChange?: (on: boolean) => void;
+  // offer the Shuffle button: the Slideshow page and albums do, the all-photos
+  // views don't
+  canShuffle?: boolean;
   // what this source has already shown: shuffle skips these
   seen: SeenStore;
 }
 
+// The d-pad drives one group of controls at a time, stepped through with
+// Up/Down from the bottom: 'nav' (Left/Right = previous/next item, always the
+// default so the arrows never change meaning on their own), 'seek' (Left/Right
+// jump the clip on screen, viewer videos only) and 'bar' (Left/Right walk the
+// options bar). The selected group's controls are ringed on screen.
+type Group = 'nav' | 'seek' | 'bar';
+
 const HIDE_MS = 3000;
 const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
-const BAR_IDLE_MS = 8000; // hide the focused bar after this long with no input
+const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this long idle
 const CAPTION_DELAY_MS = 1000; // location/date animate in this long after a transition
 const CAPTION_BROWSE_MS = 250; // ...or this long while paused and stepping by hand
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
@@ -139,6 +149,7 @@ export function WallpaperPlayer({
   onExit,
   onNearEnd,
   onShuffleChange,
+  canShuffle = true,
   seen,
 }: Props) {
   const viewer = mode === 'viewer';
@@ -182,21 +193,17 @@ export function WallpaperPlayer({
   // length of the running crossfade: shorter when stepping by hand
   const [fadeMs, setFadeMs] = useState(FADE_AUTO_MS);
   const manualRef = useRef(false); // the pending frame change came from a key press
-  // The viewer opens paused: it's for browsing, and Play turns it into a show.
+  // The viewer opens paused: it's for browsing, and Slideshow turns it into a show.
   const [paused, setPaused] = useState(viewer);
   // Viewer with "hide player overlay" set in the grid header: the chrome never
-  // shows on its own. Read once at open; Up still raises the options bar.
+  // shows on its own. Read once at open; Up still brings up the controls.
   const overlayHidden = useRef(viewer && getOverlayHidden()).current;
   const [overlay, setOverlay] = useState(!overlayHidden);
-  // when true, d-pad drives the options bar (left/right between buttons, Enter
-  // activates) instead of the photo track. Entered with Up, left with Down/Back.
-  const [focusBar, setFocusBar] = useState(false);
-  const focusBarRef = useRef(false);
-  focusBarRef.current = focusBar;
+  // which controls the d-pad drives (see Group). Back or idling drops to 'nav'.
+  const [group, setGroupState] = useState<Group>('nav');
+  const groupRef = useRef<Group>('nav');
+  groupRef.current = group;
   const barRef = useRef<HTMLDivElement>(null);
-  // transient play/pause feedback pill, shown briefly on each toggle
-  const [pill, setPill] = useState<'none' | 'paused' | 'playing'>('none');
-  const pillTimer = useRef<number | undefined>(undefined);
   // caption (place + date) committed together so a switch animates it ONCE.
   // Date is on the asset immediately but the place is reverse-geocoded async;
   // setting them separately re-keyed the caption twice (date now, place later)
@@ -375,6 +382,15 @@ export function WallpaperPlayer({
   );
 
   const asset = assets[i];
+
+  // only a video has the seek group: moving on to anything else (the show
+  // advancing past a clip) drops back to previous/next
+  useEffect(() => {
+    if (groupRef.current === 'seek' && !asset?.isVideo) {
+      groupRef.current = 'nav';
+      setGroupState('nav');
+    }
+  }, [asset?.id]);
 
   // Prefetch cache: index -> loaded item. Kept to a small sliding window so only
   // a handful of full-res stills / buffering videos live in TV memory at once.
@@ -1048,7 +1064,6 @@ export function WallpaperPlayer({
     return () => {
       window.clearTimeout(advanceTimer.current);
       window.clearTimeout(hideTimer.current);
-      window.clearTimeout(pillTimer.current);
       window.clearTimeout(motionFadeTimer.current);
       for (const e of held.values()) teardown(e);
       held.clear();
@@ -1083,12 +1098,13 @@ export function WallpaperPlayer({
 
   const poke = useCallback(() => {
     window.clearTimeout(hideTimer.current);
-    if (focusBarRef.current) {
+    if (groupRef.current !== 'nav') {
       setOverlay(true);
-      // focused but idle: after a longer window, hide the bar AND drop focus
+      // a group picked but idle: after a longer window, hide the controls AND
+      // drop back to previous/next, so hidden controls always mean the default
       hideTimer.current = window.setTimeout(() => {
-        setFocusBar(false);
-        focusBarRef.current = false;
+        groupRef.current = 'nav';
+        setGroupState('nav');
         (document.activeElement as HTMLElement | null)?.blur();
         setOverlay(false);
       }, BAR_IDLE_MS);
@@ -1111,42 +1127,31 @@ export function WallpaperPlayer({
     btns[cur < 0 ? 0 : (cur + delta + btns.length) % btns.length].focus();
   }, []);
 
-  const enterBar = useCallback(() => {
-    setFocusBar(true);
-    focusBarRef.current = true; // sync: poke() below arms the focused-idle timer
-    setOverlay(true);
-    // focus the first button after the overlay has painted
-    requestAnimationFrame(() => focusBarBtn(1));
-    poke(); // arm the 8s idle-hide (resets on every subsequent key)
-  }, [focusBarBtn, poke]);
-
-  const leaveBar = useCallback(() => {
-    setFocusBar(false);
-    focusBarRef.current = false; // sync: poke() below reads the ref, not state
-    (document.activeElement as HTMLElement | null)?.blur();
-    poke();
-  }, [poke]);
-
-  const flashPill = useCallback((mode: 'paused' | 'playing') => {
-    setPill(mode);
-    window.clearTimeout(pillTimer.current);
-    pillTimer.current = window.setTimeout(() => setPill('none'), 1400);
-  }, []);
+  // Pick the group the d-pad drives. The bar focuses its first button; the
+  // others drop any bar focus. poke() then brings the controls up (even with
+  // the overlay set hidden) and arms the idle drop back to 'nav'.
+  const selectGroup = useCallback(
+    (g: Group) => {
+      groupRef.current = g; // sync: poke() below reads the ref, not state
+      setGroupState(g);
+      // focus after the overlay has painted
+      if (g === 'bar') requestAnimationFrame(() => focusBarBtn(1));
+      else (document.activeElement as HTMLElement | null)?.blur();
+      poke();
+    },
+    [focusBarBtn, poke],
+  );
 
   // Start or stop the show. Starting it drops any zoom so the photos come up
   // whole.
-  const setPlaying = useCallback(
-    (on: boolean) => {
-      if (on === !pausedRef.current) return;
-      if (on) {
-        setZoom(1);
-        setPan({ x: 0, y: 0 });
-      }
-      setPaused(!on);
-      flashPill(on ? 'playing' : 'paused');
-    },
-    [flashPill],
-  );
+  const setPlaying = useCallback((on: boolean) => {
+    if (on === !pausedRef.current) return;
+    if (on) {
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+    }
+    setPaused(!on);
+  }, []);
 
   const exit = useCallback(() => {
     onExit(shownAssetRef.current ?? assets[iRef.current] ?? null);
@@ -1429,33 +1434,42 @@ export function WallpaperPlayer({
       const code = e.keyCode;
       poke();
       const dir = dirFromKey(code);
+      // viewer on a video: OK and the media keys drive the clip
+      const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
+      // the seek group needs a clip that loaded (a failed one shows no transport)
+      const seekable = !!vid && !cache.current.get(iRef.current)?.error;
+      const g = groupRef.current;
 
-      // options bar has focus: Left/Right walk its buttons, Down or Back
-      // leaves it
-      if (focusBarRef.current) {
-        const active = document.activeElement as HTMLElement | null;
-        if (dir === 'left') {
-          e.preventDefault();
-          focusBarBtn(-1);
-        } else if (dir === 'right') {
-          e.preventDefault();
-          focusBarBtn(1);
-        } else if (dir === 'up') {
-          e.preventDefault();
-        } else if (dir === 'down' || isBack(code)) {
-          e.preventDefault();
-          leaveBar();
-        } else if (code === Key.Enter) {
-          e.preventDefault();
-          active?.click();
-        }
+      // Back drops a picked group back to previous/next first, then closes
+      if (isBack(code)) {
+        e.preventDefault();
+        if (g !== 'nav') selectGroup('nav');
+        else exit();
         return;
       }
 
-      if (isBack(code)) {
-        e.preventDefault();
-        exit();
-        return;
+      // options bar: Left/Right walk its buttons, OK presses one, Down steps
+      // back down. The media keys still reach the clip/show below.
+      if (g === 'bar') {
+        if (dir === 'left' || dir === 'right') {
+          e.preventDefault();
+          focusBarBtn(dir === 'left' ? -1 : 1);
+          return;
+        }
+        if (dir === 'up') {
+          e.preventDefault();
+          return;
+        }
+        if (dir === 'down') {
+          e.preventDefault();
+          selectGroup(seekable ? 'seek' : 'nav');
+          return;
+        }
+        if (code === Key.Enter) {
+          e.preventDefault();
+          (document.activeElement as HTMLElement | null)?.click();
+          return;
+        }
       }
 
       // zoomed photo: arrows pan it and OK resets to fit
@@ -1478,15 +1492,20 @@ export function WallpaperPlayer({
         }
       }
 
+      // Up/Down step through the groups: nav, seek (videos only), bar
       if (dir === 'up') {
         e.preventDefault();
-        enterBar(); // raise + focus the options bar
+        selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
+        return;
+      }
+      if (dir === 'down') {
+        e.preventDefault();
+        if (g === 'seek') selectGroup('nav');
         return;
       }
 
-      // viewer on a video: OK plays/pauses the clip; left/right seek while it
-      // plays and step to the previous/next item while it's paused
-      const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
+      // viewer on a video: OK plays/pauses the clip; Left/Right step to the
+      // previous/next item, or jump the clip with the seek group picked
       if (vid) {
         if (code === Key.Enter || code === Key.PlayPause) {
           e.preventDefault();
@@ -1506,10 +1525,10 @@ export function WallpaperPlayer({
           seek(-SEEK_STEP);
         } else if (dir === 'left') {
           e.preventDefault();
-          vid.paused ? advance(-1, true) : seek(-SEEK_STEP);
+          g === 'seek' ? seek(-SEEK_STEP) : advance(-1, true);
         } else if (dir === 'right') {
           e.preventDefault();
-          vid.paused ? advance(1, true) : seek(SEEK_STEP);
+          g === 'seek' ? seek(SEEK_STEP) : advance(1, true);
         }
         return;
       }
@@ -1538,8 +1557,7 @@ export function WallpaperPlayer({
     exit,
     poke,
     setPlaying,
-    enterBar,
-    leaveBar,
+    selectGroup,
     focusBarBtn,
     viewer,
     toggleVideo,
@@ -1565,8 +1583,10 @@ export function WallpaperPlayer({
   const metaKey = `${meta.loc ?? ''}|${meta.date}`;
   const pct = progress.dur > 0 ? (progress.cur / progress.dur) * 100 : 0;
   const bufferedPct = progress.dur > 0 ? Math.min(100, (progress.buffered / progress.dur) * 100) : 0;
-  // pointer arrows, viewer only: hidden at the ends and while zoomed (arrows pan)
-  const showArrows = viewer && !zoomed;
+  // previous/next arrows: hidden at the viewer's ends (the show wraps) and
+  // while zoomed (the d-pad pans)
+  const showPrev = !zoomed && (!viewer || i > 0);
+  const showNext = !zoomed && (!viewer || i < assets.length - 1);
 
   // Zoom minimap: the whole photo with a rectangle marking the visible region,
   // computed from the contain-fit size, the current scale, and the pan (all in
@@ -1635,7 +1655,7 @@ export function WallpaperPlayer({
   // the content box, leaving the sidebar visible instead of a true fullscreen.
   return createPortal(
     <div
-      class={'wp-player ' + (overlay ? 'show-ui' : '')}
+      class={'wp-player group-' + group + (overlay ? ' show-ui' : '')}
       onMouseMove={poke}
       onWheel={viewer ? onWheel : undefined}
       onPointerDown={viewer ? onImgDown : undefined}
@@ -1755,23 +1775,29 @@ export function WallpaperPlayer({
       )}
 
       <div class="wp-player-ui">
-        {showArrows && i > 0 && (
+        {showPrev && (
           <button class="fs-arrow left" onClick={() => advance(-1, true)} title="Previous">
             <Icon name="chevronLeft" size={48} />
           </button>
         )}
-        {showArrows && i < assets.length - 1 && (
+        {showNext && (
           <button class="fs-arrow right" onClick={() => advance(1, true)} title="Next">
             <Icon name="chevronRight" size={48} />
           </button>
         )}
 
-        {/* video transport: play/pause + time, above the caption (the seek
-            bar is the edge line) */}
+        {/* video transport: 10s jumps around play/pause, + time, above the
+            caption (the seek bar is the edge line) */}
         {curVideo && !videoError && !warming && (
           <div class="wp-transport">
-            <button class="fs-btn round" onClick={toggleVideo}>
+            <button class="fs-btn round" onClick={() => seek(-SEEK_STEP)} title="Back 10 seconds">
+              <Icon name="rewind10" size={30} />
+            </button>
+            <button class="fs-btn round" onClick={toggleVideo} title={vidPaused ? 'Play' : 'Pause'}>
               <Icon name={vidPaused ? 'play' : 'pause'} size={30} />
+            </button>
+            <button class="fs-btn round" onClick={() => seek(SEEK_STEP)} title="Forward 10 seconds">
+              <Icon name="forward10" size={30} />
             </button>
             <span class="fs-time">
               {fmt(progress.cur)} / {fmt(progress.dur)}
@@ -1779,20 +1805,14 @@ export function WallpaperPlayer({
           </div>
         )}
 
-        <div class={'wp-player-top' + (focusBar ? ' bar-focus' : '')} ref={barRef}>
-          {pill !== 'none' && (
-            <span class="wp-player-pill">
-              <Icon name={pill === 'paused' ? 'pause' : 'play'} size={22} />
-              {pill === 'paused' ? 'Paused' : 'Playing'}
-            </span>
-          )}
+        <div class="wp-player-top" ref={barRef}>
           <button
             class={'wp-text-btn' + (paused ? '' : ' active')}
             onClick={() => { setPlaying(pausedRef.current); poke(); }}
-            title={paused ? 'Play slideshow' : 'Pause slideshow'}
+            title={paused ? 'Start slideshow' : 'Pause slideshow'}
           >
             <Icon name={paused ? 'play' : 'pause'} size={22} />
-            <span>{paused ? 'Play' : 'Pause'}</span>
+            <span>Slideshow</span>
           </button>
           {liveId && (
             <button
@@ -1820,13 +1840,15 @@ export function WallpaperPlayer({
               </button>
             ))}
           </div>
-          <button
-            class={'wp-icon-btn' + (shuffle ? ' active' : '')}
-            onClick={() => { toggleShuffle(); poke(); }}
-            title="Shuffle"
-          >
-            <Icon name="shuffle" size={22} />
-          </button>
+          {canShuffle && (
+            <button
+              class={'wp-icon-btn' + (shuffle ? ' active' : '')}
+              onClick={() => { toggleShuffle(); poke(); }}
+              title="Shuffle"
+            >
+              <Icon name="shuffle" size={22} />
+            </button>
+          )}
         </div>
       </div>
     </div>,
