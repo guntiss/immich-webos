@@ -33,13 +33,14 @@ const SPEEDS = [
   { label: '10s', ms: 10000 },
   { label: '15s', ms: 15000 },
 ];
-const DEFAULT_MS = SPEEDS[1].ms; // dwell per still (10s)
+const DEFAULT_MS = SPEEDS[0].ms; // dwell per still (5s)
 const GENRES = [
   { label: 'Ambient', tag: 'ambient' },
   { label: 'Lofi', tag: 'lofi' },
   { label: 'Jazz', tag: 'jazz' },
   { label: 'Classical', tag: 'classical' },
 ];
+const DEFAULT_GENRE = 'lofi'; // music starts on with this genre (photos mode)
 const WINDOW = 3; // stills prefetched ahead at original quality (TV bandwidth/RAM)
 const VIDEO_STALL_MS = 8000; // skip a video that hasn't produced a frame by now
 const PREBUFFER_S = 5; // seconds of the NEXT video to pre-download
@@ -133,12 +134,13 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
   const intervalRef = useRef(DEFAULT_MS);
   intervalRef.current = intervalMs;
   // background music (Radio Browser internet-radio streams)
-  const [musicOn, setMusicOn] = useState(false);
-  const [genre, setGenre] = useState(GENRES[0].tag);
+  // on by default in photos mode; videos mode plays the clips' own audio
+  const [musicOn, setMusicOn] = useState(mode === 'photos');
+  const [genre, setGenre] = useState(DEFAULT_GENRE);
   const [stations, setStations] = useState<Station[]>([]);
   const [stIdx, setStIdx] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const musicOnRef = useRef(false);
+  const musicOnRef = useRef(musicOn);
   musicOnRef.current = musicOn;
   const [, setTick] = useState(0);
   const bump = useCallback(() => setTick((t) => t + 1), []);
@@ -793,6 +795,12 @@ export function WallpaperPlayer({ assets: assetsProp, mode, onExit, onNearEnd, o
       a.pause();
     }
   }, [musicOn, stIdx, stations]);
+
+  // music starts on: fetch the default genre's stations as the player opens
+  useEffect(() => {
+    if (musicOnRef.current) void loadGenre(DEFAULT_GENRE);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // stop music when the player closes
   useEffect(() => () => audioRef.current?.pause(), []);
