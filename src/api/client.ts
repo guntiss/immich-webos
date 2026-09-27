@@ -594,7 +594,7 @@ export async function getAssetFaces(id: string): Promise<FaceBox[]> {
   return boxes;
 }
 
-export function thumbnailUrl(id: string, size: 'thumbnail' | 'preview' = 'thumbnail'): string {
+export function thumbnailUrl(id: string, size: 'thumbnail' | 'preview' | 'fullsize' = 'thumbnail'): string {
   return `${base()}/assets/${id}/thumbnail?size=${size}`;
 }
 

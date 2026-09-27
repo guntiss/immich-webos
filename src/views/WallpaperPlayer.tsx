@@ -102,6 +102,12 @@ const SCREEN_PX =
 type Still = HTMLImageElement | HTMLCanvasElement;
 const stillSize = (s: Still): [number, number] =>
   s instanceof HTMLCanvasElement ? [s.width, s.height] : [s.naturalWidth, s.naturalHeight];
+// pull a still off the stage / frame layer, freeing a canvas's pixels now
+// rather than whenever it's collected
+function freeStill(s: Still): void {
+  s.remove();
+  if (s instanceof HTMLCanvasElement) s.width = s.height = 0;
+}
 
 interface Cached {
   src: string;
@@ -119,6 +125,9 @@ interface Cached {
   q?: VideoQuality; // for video: which stream it's playing
   settled?: Promise<void>; // for video: resolves once ready (or failed for good)
   img?: Still; // for still: the fully-decoded, reusable <img>/canvas element
+  // for still: the screen-sized still (and its src) its full original replaced
+  // while zoomed; put back when another photo is zoomed (see zoomOriginal)
+  base?: { img: Still; src: string };
 }
 
 interface Frame {
@@ -486,6 +495,23 @@ export function WallpaperPlayer({
   // next garbage collection, while a 2D canvas frees on teardown. The original
   // is used when it's no bigger than the screen, else the preview (also the
   // HEIC/RAW fallback).
+  const bitmapStill = useCallback(
+    async (url: string, id: string): Promise<HTMLCanvasElement | null> => {
+      try {
+        const bmp = await createImageBitmap(await loadBlob(url));
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        canvas.getContext('2d')!.drawImage(bmp, 0, 0);
+        bmp.close();
+        await prepStill(canvas, id);
+        return canvas;
+      } catch {
+        return null; // undecodable (e.g. a HEIC/RAW original)
+      }
+    },
+    [prepStill],
+  );
   const loadBitmapStill = useCallback(
     async (a: Asset): Promise<Cached | null> => {
       const fits = await getAssetPixels(a.id)
@@ -493,22 +519,12 @@ export function WallpaperPlayer({
         .catch(() => false);
       const preview = thumbnailUrl(a.id, 'preview');
       for (const url of fits ? [originalUrl(a.id), preview] : [preview]) {
-        try {
-          const bmp = await createImageBitmap(await loadBlob(url));
-          const canvas = document.createElement('canvas');
-          canvas.width = bmp.width;
-          canvas.height = bmp.height;
-          canvas.getContext('2d')!.drawImage(bmp, 0, 0);
-          bmp.close();
-          await prepStill(canvas, a.id);
-          return { src: url, isVideo: false, blob: false, ready: true, decoded: true, img: canvas };
-        } catch {
-          // undecodable (e.g. a HEIC/RAW original) — try the preview
-        }
+        const canvas = await bitmapStill(url, a.id);
+        if (canvas) return { src: url, isVideo: false, blob: false, ready: true, decoded: true, img: canvas };
       }
       return null;
     },
-    [prepStill],
+    [bitmapStill],
   );
 
   // Point a video at the other stream (transcoded <-> original), resuming where
@@ -706,11 +722,8 @@ export function WallpaperPlayer({
       e.el.load();
       e.el.remove();
     }
-    if (e.img) {
-      e.img.remove(); // pull the still off the stage / frame layer
-      // free the canvas's pixels now rather than whenever it's collected
-      if (e.img instanceof HTMLCanvasElement) e.img.width = e.img.height = 0;
-    }
+    if (e.img) freeStill(e.img);
+    if (e.base) freeStill(e.base.img);
   };
 
   // Drop cached items outside the [i-2, i+WINDOW] window. Two behind (not one)
@@ -1197,6 +1210,7 @@ export function WallpaperPlayer({
   // ---- viewer: the frame on screen ----
   const visible = showA ? layers.a : layers.b;
   const visibleImg = viewer ? visible?.img ?? null : null;
+  const shownId = visible?.asset.id;
   const visibleVid = viewer ? visible?.el ?? null : null;
   const liveId = viewer && visible && !visible.asset.isVideo ? visible.asset.livePhotoVideoId ?? null : null;
 
@@ -1319,42 +1333,107 @@ export function WallpaperPlayer({
 
   // Zoom: scale the still on screen. The element lives outside Preact (it's
   // reparented from the cache), so the transform is set on it directly. A new
-  // frame resets the zoom and clears the transform left on the old element.
-  const zoomElRef = useRef<Still | null>(null);
+  // photo resets the zoom and clears the transform left on the old element;
+  // the same photo swapped for its original (see below) keeps its zoom.
+  const zoomElRef = useRef<{ el: Still | null; id?: string }>({ el: null });
   useEffect(() => {
     const prev = zoomElRef.current;
-    if (prev !== visibleImg) {
-      if (prev) prev.style.transform = '';
-      zoomElRef.current = visibleImg;
-      if (zoomRef.current !== 1) {
+    if (prev.el !== visibleImg) {
+      if (prev.el) prev.el.style.transform = '';
+      zoomElRef.current = { el: visibleImg, id: shownId };
+      if (prev.id !== shownId && zoomRef.current !== 1) {
         setZoom(1);
         setPan({ x: 0, y: 0 });
+        return;
       }
-      return;
     }
     if (visibleImg) {
       visibleImg.style.transform =
         zoom > 1 ? `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` : '';
     }
-  }, [visibleImg, zoom, pan]);
+  }, [visibleImg, shownId, zoom, pan]);
 
-  const zoomBy = useCallback((inward: boolean) => {
+  // Zoom one step in or out about `at` (screen px), keeping the point of the
+  // photo under it in place, else about the middle. The photo scales about
+  // the screen centre and then shifts by the pan, so for a point `d` from the
+  // centre the pan becomes d - k(d - pan), k being the zoom ratio.
+  const zoomBy = useCallback((inward: boolean, at?: { x: number; y: number }) => {
     const z = zoomRef.current;
     const next = Math.min(MAX_ZOOM, Math.max(1, inward ? z * ZOOM_STEP : z / ZOOM_STEP));
+    zoomRef.current = next; // sync: wheel ticks can land before the re-render
     setZoom(next);
-    setPan((p) => (next <= 1.001 ? { x: 0, y: 0 } : clampPan(p.x, p.y, next)));
+    setPan((p) => {
+      if (next <= 1.001) return { x: 0, y: 0 };
+      const k = next / z;
+      const dx = at ? at.x - window.innerWidth / 2 : 0;
+      const dy = at ? at.y - window.innerHeight / 2 : 0;
+      return clampPan(dx - k * (dx - p.x), dy - k * (dy - p.y), next);
+    });
   }, []);
 
-  // Scroll wheel (LG magic remote / mouse) zooms a still while browsing.
+  // Scroll wheel (LG magic remote / mouse) zooms a still while browsing,
+  // toward the pointer.
   const onWheel = useCallback(
     (e: WheelEvent) => {
       if (!visibleImg || !pausedRef.current) return;
       e.preventDefault();
       poke();
-      zoomBy(e.deltaY < 0);
+      zoomBy(e.deltaY < 0, { x: e.clientX, y: e.clientY });
     },
     [visibleImg, poke, zoomBy],
   );
+
+  // Zoomed in, the photo swaps to its full original: the still shown is only
+  // screen-sized (the preview, for anything bigger than the screen) and goes
+  // soft scaled up. The original is decoded once zoom starts and put in the
+  // visible layer in its place, keeping the zoom. One at a time (a 24MP
+  // original is ~100MB decoded): the photo zoomed before goes back to its
+  // screen-sized still. An original the TV can't decode (HEIC/RAW) tries
+  // Immich's full-size JPEG, else the preview stays. Newer sets only (the
+  // bitmap path, see loadBitmapStill).
+  const zoomed = zoom > 1;
+  const zoomOrigRef = useRef<Cached | null>(null);
+  useEffect(() => {
+    if (!zoomed || !canBitmap || !visibleImg || !shownId) return;
+    const img = visibleImg;
+    const id = shownId;
+    const e = Array.from(cache.current.values()).find((c) => c.img === img);
+    if (!e || e.base || e.src === originalUrl(id)) return; // already full size
+    let alive = true;
+    // put `to` in place of `from` in whichever layer holds it
+    const swap = (from: Still, to: Still) =>
+      setLayers((l) => ({
+        a: l.a && l.a.img === from ? { ...l.a, img: to } : l.a,
+        b: l.b && l.b.img === from ? { ...l.b, img: to } : l.b,
+      }));
+    void (async () => {
+      let src = originalUrl(id);
+      let full = await bitmapStill(src, id);
+      if (!full && alive) {
+        src = thumbnailUrl(id, 'fullsize');
+        full = await bitmapStill(src, id);
+      }
+      if (!full) return;
+      if (!alive || e.gone || e.img !== img) return freeStill(full);
+      const last = zoomOrigRef.current;
+      if (last && last !== e && last.base && !last.gone) {
+        const was = last.img!;
+        last.img = last.base.img;
+        last.src = last.base.src;
+        last.base = undefined;
+        swap(was, last.img);
+        freeStill(was);
+      }
+      e.base = { img, src: e.src };
+      e.img = full;
+      e.src = src;
+      zoomOrigRef.current = e;
+      swap(img, full);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [zoomed, visibleImg, shownId, bitmapStill]);
 
   // Pointer drag pans a zoomed photo (magic-remote pointer / mouse). Handlers
   // sit on the player root and fire via bubbling; presses on the controls are
@@ -1389,8 +1468,6 @@ export function WallpaperPlayer({
   }, []);
 
   // the zoom minimap draws the grid thumbnail (a cache hit)
-  const zoomed = zoom > 1;
-  const shownId = visible?.asset.id;
   useEffect(() => {
     if (!zoomed || !shownId) return;
     let alive = true;
