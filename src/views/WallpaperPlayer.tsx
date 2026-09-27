@@ -64,13 +64,12 @@ interface Props {
 // The d-pad drives one group of controls at a time, stepped through with
 // Down/Up in the order they sit on screen, top to bottom: 'nav' (Left/Right =
 // previous/next item, the side arrows; always the default so the arrows never
-// change meaning on their own), 'seek' (Left/Right jump the clip, the video
-// transport above the bar; viewer videos only) and 'bar' (Left/Right walk the
-// options bar along the bottom edge). The selected group's controls are ringed.
-// Up past the top group ('nav') or Down past the bottom one ('bar') puts the
-// controls away, and either key brings hidden controls back up on 'nav'.
-// On a video, 'nav' steps on the key's release, and holding it seeks the clip.
-type Group = 'nav' | 'seek' | 'bar';
+// change meaning on their own) and 'bar' (Left/Right walk the options bar
+// along the bottom edge). The selected group's controls are ringed. Up past
+// 'nav' or Down past 'bar' puts the controls away, and either key brings
+// hidden controls back up on 'nav'. On a video, 'nav' steps on the key's
+// release, and holding it seeks the clip.
+type Group = 'nav' | 'bar';
 
 const HIDE_MS = 3000;
 const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
@@ -500,15 +499,6 @@ export function WallpaperPlayer({
   );
 
   const asset = assets[i];
-
-  // only a video has the seek group: moving on to anything else (the show
-  // advancing past a clip) drops back to previous/next
-  useEffect(() => {
-    if (groupRef.current === 'seek' && !asset?.isVideo) {
-      groupRef.current = 'nav';
-      setGroupState('nav');
-    }
-  }, [asset?.id]);
 
   // Prefetch cache: index -> loaded item. Kept to a small sliding window so only
   // a handful of full-res stills / buffering videos live in TV memory at once.
@@ -1285,19 +1275,6 @@ export function WallpaperPlayer({
     setPaused(!on);
   }, []);
 
-  // Viewer: a pointer click on a photo (anywhere but the controls) starts or
-  // stops the slideshow, like OK, and like OK leaves the controls as they are.
-  // Not while zoomed, where a drag pans.
-  const onPhotoClick = useCallback(
-    (e: MouseEvent) => {
-      if (closingRef.current) return;
-      if ((e.target as HTMLElement).closest('.wp-player-ui, .wp-edge-progress')) return;
-      if (assets[iRef.current]?.isVideo || zoomRef.current > 1) return;
-      setPlaying(pausedRef.current);
-    },
-    [assets, setPlaying],
-  );
-
   const exit = useCallback(() => {
     if (closingRef.current) return;
     const shown = shownAssetRef.current ?? assets[iRef.current] ?? null;
@@ -1489,6 +1466,22 @@ export function WallpaperPlayer({
       setPlaying(false); // pausing a clip mid-show stops the show too
     }
   }, [playEl, setPlaying]);
+
+  // Viewer: a pointer click on the scene (anywhere but the controls) does
+  // what OK does: a photo starts or stops the slideshow (leaving the controls
+  // as they are), a video plays or pauses. Not while zoomed, where a drag pans.
+  const onSceneClick = useCallback(
+    (e: MouseEvent) => {
+      if (closingRef.current) return;
+      if ((e.target as HTMLElement).closest('.wp-player-ui, .wp-edge-progress')) return;
+      if (zoomRef.current > 1) return;
+      if (assets[iRef.current]?.isVideo) {
+        toggleVideo();
+        poke();
+      } else setPlaying(pausedRef.current);
+    },
+    [assets, toggleVideo, poke, setPlaying],
+  );
 
   const seek = useCallback(
     (delta: number) => {
@@ -1770,7 +1763,7 @@ export function WallpaperPlayer({
       const dir = dirFromKey(code);
       // viewer on a video: OK and the media keys drive the clip
       const vid = viewer ? cache.current.get(iRef.current)?.el : undefined;
-      // the seek group needs a clip that loaded (a failed one shows no transport)
+      // holding Left/Right seeks only a clip that loaded
       const seekable = !!vid && !cache.current.get(iRef.current)?.error;
       const g = groupRef.current;
       const shown = overlayRef.current; // as before this key's poke() below
@@ -1796,8 +1789,8 @@ export function WallpaperPlayer({
       }
 
       // options bar: Left/Right walk its buttons, OK presses one, Up steps
-      // back up, Down (past the bottom) hides the controls. The media keys
-      // still reach the clip/show below.
+      // back up to previous/next, Down (past the bottom) hides the controls.
+      // The media keys still reach the clip/show below.
       if (g === 'bar') {
         if (dir === 'left' || dir === 'right') {
           e.preventDefault();
@@ -1806,7 +1799,7 @@ export function WallpaperPlayer({
         }
         if (dir === 'up') {
           e.preventDefault();
-          selectGroup(seekable ? 'seek' : 'nav');
+          selectGroup('nav');
           return;
         }
         if (dir === 'down') {
@@ -1841,28 +1834,26 @@ export function WallpaperPlayer({
         }
       }
 
-      // Down/Up step through the groups as they sit on screen: nav (the side
-      // arrows), seek (the transport, videos only), bar (the bottom edge).
-      // Up from nav hides the controls (as Down from the bar does), and either
-      // key brings hidden ones back on nav (hidden always means nav, see
-      // hideControls) before stepping on.
+      // Down/Up step between the groups as they sit on screen: nav (the side
+      // arrows) and the bar (the bottom edge). Up from nav hides the controls
+      // (as Down from the bar does), and either key brings hidden ones back
+      // on nav (hidden always means nav, see hideControls).
       if (dir === 'down') {
         e.preventDefault();
         if (!shown) showControls();
-        else selectGroup(g === 'nav' && seekable ? 'seek' : 'bar');
+        else selectGroup('bar');
         return;
       }
       if (dir === 'up') {
         e.preventDefault();
         if (!shown) showControls();
-        else if (g === 'seek') selectGroup('nav');
         else hideControls();
         return;
       }
 
       // viewer on a video: OK plays/pauses the clip; Left/Right step to the
       // previous/next item (on the release, as holding them seeks the clip:
-      // see pressRef), or jump the clip with the seek group picked
+      // see pressRef)
       if (vid) {
         if (code === Key.Enter || code === Key.PlayPause) {
           e.preventDefault();
@@ -1883,8 +1874,7 @@ export function WallpaperPlayer({
         } else if (step) {
           e.preventDefault();
           const d = dir === 'left' ? -1 : 1;
-          if (g === 'seek') seek(d * SEEK_STEP);
-          else if (!seekable) advance(d, true);
+          if (!seekable) advance(d, true);
           else {
             const press: Press = { code, dir: d, held: false, timer: 0 };
             pressRef.current = press;
@@ -2088,7 +2078,7 @@ export function WallpaperPlayer({
         (phase !== 'open' ? ' ' + phase : '') + (hero?.go ? ' hero-go' : '')
       }
       onMouseMove={poke}
-      onClick={viewer ? onPhotoClick : undefined}
+      onClick={viewer ? onSceneClick : undefined}
       onWheel={viewer ? onWheel : undefined}
       onPointerDown={viewer ? onImgDown : undefined}
       onPointerMove={viewer ? onImgMove : undefined}
@@ -2258,18 +2248,12 @@ export function WallpaperPlayer({
           </button>
         )}
 
-        {/* video transport: 10s jumps around play/pause, + time, above the
-            caption (the seek bar is the edge line) */}
+        {/* video transport: play/pause + time, above the caption (the seek
+            bar is the edge line) */}
         {curVideo && !videoError && !warming && (
           <div class="wp-transport">
-            <button class="fs-btn round" onClick={() => seek(-SEEK_STEP)} title="Back 10 seconds">
-              <Icon name="rewind10" size={30} />
-            </button>
             <button class="fs-btn round" onClick={toggleVideo} title={vidPaused ? 'Play' : 'Pause'}>
               <Icon name={vidPaused ? 'play' : 'pause'} size={30} />
-            </button>
-            <button class="fs-btn round" onClick={() => seek(SEEK_STEP)} title="Forward 10 seconds">
-              <Icon name="forward10" size={30} />
             </button>
             <span class="fs-time">
               {fmt(progress.cur)} / {fmt(progress.dur)}

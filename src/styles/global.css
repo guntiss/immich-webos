@@ -1415,8 +1415,8 @@ select {
   background: rgba(40, 40, 48, 0.85);
 }
 
-/* viewer transport, above the bottom-left caption: a video's jumps +
-   play/pause + elapsed / total, or a photo's slideshow play/pause + number */
+/* viewer transport, above the bottom-left caption: a video's play/pause +
+   elapsed / total, or a photo's slideshow play/pause + number */
 .wp-transport {
   position: absolute;
   left: 48px;
@@ -2088,9 +2088,8 @@ select {
   box-shadow: 0 0 0 3px var(--immich-dark-primary);
 }
 /* The control group Left/Right drive (picked with Up/Down, see Group in
-   WallpaperPlayer) is ringed: the previous/next arrows, or the video's jump
-   and play buttons. The options bar rings its focused button above. */
-.wp-player.group-nav .fs-arrow,
-.wp-player.group-seek .wp-transport .fs-btn {
+   WallpaperPlayer) is ringed: the previous/next arrows here, the options
+   bar's focused button above. */
+.wp-player.group-nav .fs-arrow {
   border-color: var(--immich-dark-primary);
 }
