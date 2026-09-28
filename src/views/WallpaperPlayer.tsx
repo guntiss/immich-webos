@@ -345,6 +345,8 @@ export function WallpaperPlayer({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
+  // the zoom stopped the show (see onWheel): back to fit starts it again
+  const zoomPausedRef = useRef(false);
   const panDragRef = useRef({ on: false, x: 0, y: 0 });
   const [miniSrc, setMiniSrc] = useState<string | null>(null);
 
@@ -1374,13 +1376,24 @@ export function WallpaperPlayer({
   // Start or stop the show. Starting it drops any zoom so the photos come up
   // whole.
   const setPlaying = useCallback((on: boolean) => {
+    zoomPausedRef.current = false; // started or stopped by hand: that stands
     if (on === !pausedRef.current) return;
     if (on) {
       setZoom(1);
       setPan({ x: 0, y: 0 });
     }
+    pausedRef.current = !on; // sync: wheel ticks can land before the re-render
     setPaused(!on);
   }, []);
+
+  // Back to fit. A show the zoom stopped starts again (in the same render,
+  // so a Live Photo never sees itself unzoomed and paused, and plays).
+  const unzoom = useCallback(() => {
+    zoomRef.current = 1;
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    if (zoomPausedRef.current) setPlaying(true);
+  }, [setPlaying]);
 
   const exit = useCallback(() => {
     if (closingRef.current) return;
@@ -1674,17 +1687,13 @@ export function WallpaperPlayer({
     if (prev.el !== visibleImg) {
       if (prev.el) prev.el.style.transform = '';
       zoomElRef.current = { el: visibleImg, id: shownId };
-      if (prev.id !== shownId && zoomRef.current !== 1) {
-        setZoom(1);
-        setPan({ x: 0, y: 0 });
-        return;
-      }
+      if (prev.id !== shownId && zoomRef.current !== 1) return unzoom();
     }
     if (visibleImg) {
       visibleImg.style.transform =
         zoom > 1 ? `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` : '';
     }
-  }, [visibleImg, shownId, zoom, pan]);
+  }, [visibleImg, shownId, zoom, pan, unzoom]);
 
   // Zoom one step in or out about `at` (screen px), keeping the point of the
   // photo under it in place, else about the middle. The photo scales about
@@ -1693,27 +1702,37 @@ export function WallpaperPlayer({
   const zoomBy = useCallback((inward: boolean, at?: { x: number; y: number }) => {
     const z = zoomRef.current;
     const next = Math.min(MAX_ZOOM, Math.max(1, inward ? z * ZOOM_STEP : z / ZOOM_STEP));
+    if (next <= 1.001) return unzoom();
     zoomRef.current = next; // sync: wheel ticks can land before the re-render
     setZoom(next);
     setPan((p) => {
-      if (next <= 1.001) return { x: 0, y: 0 };
       const k = next / z;
       const dx = at ? at.x - window.innerWidth / 2 : 0;
       const dy = at ? at.y - window.innerHeight / 2 : 0;
       return clampPan(dx - k * (dx - p.x), dy - k * (dy - p.y), next);
     });
-  }, []);
+  }, [unzoom]);
 
-  // Scroll wheel (LG magic remote / mouse) zooms a still while browsing,
-  // toward the pointer.
+  // Scroll wheel (LG magic remote / mouse) zooms a still, toward the pointer.
+  // Zooming in stops the slideshow, and zooming back out to fit starts it
+  // again (see unzoom); while it runs, scrolling out does nothing.
   const onWheel = useCallback(
     (e: WheelEvent) => {
-      if (!visibleImg || !pausedRef.current || closingRef.current) return;
+      if (!visibleImg || closingRef.current) return;
+      const inward = e.deltaY < 0;
+      if (!pausedRef.current) {
+        if (!inward) return;
+        // stop the dwell now, not a render later: running out meanwhile, it
+        // would step off the photo being zoomed
+        window.clearTimeout(advanceTimer.current);
+        setPlaying(false);
+        zoomPausedRef.current = true;
+      }
       e.preventDefault();
       poke();
-      zoomBy(e.deltaY < 0, { x: e.clientX, y: e.clientY });
+      zoomBy(inward, { x: e.clientX, y: e.clientY });
     },
-    [visibleImg, poke, zoomBy],
+    [visibleImg, poke, zoomBy, setPlaying],
   );
 
   // Zoomed in, the photo swaps to its full original: the still shown is only
@@ -1901,11 +1920,8 @@ export function WallpaperPlayer({
       if (isBack(code)) {
         e.preventDefault();
         if (g !== 'nav') selectGroup('nav');
-        else if (zoomRef.current > 1) {
-          zoomRef.current = 1;
-          setZoom(1);
-          setPan({ x: 0, y: 0 });
-        } else exit();
+        else if (zoomRef.current > 1) unzoom();
+        else exit();
         return;
       }
 
@@ -1939,8 +1955,7 @@ export function WallpaperPlayer({
       if (zoomRef.current > 1) {
         if (code === Key.Enter || code === Key.PlayPause) {
           e.preventDefault();
-          setZoom(1);
-          setPan({ x: 0, y: 0 });
+          unzoom();
           return;
         }
         if (dir) {
@@ -2078,6 +2093,7 @@ export function WallpaperPlayer({
     clipEnded,
     poke,
     setPlaying,
+    unzoom,
     selectGroup,
     showControls,
     hideControls,
