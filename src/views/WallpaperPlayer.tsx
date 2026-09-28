@@ -76,8 +76,9 @@ const VIEWER_HIDE_MS = 5000; // browsing: the overlay lingers a little longer
 const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this long idle
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
-const FADE_START_MS = 150; // a crossfade starts about this long after the swap (see `fading`)
+const FADE_CLIP_MS = 150; // a clip replacing a clip: it starts playing only after this (see the show effect)
 const POSTER_WAIT_MS = 1000; // a clip waits this long at most for its poster (see clipBox)
+const SETTLE_MS = 3000; // prefetching waits this long at most for the item shown to settle (see the show effect)
 const HERO_MS = 320; // a photo growing out of / shrinking back into its grid cell
 const HERO_EASE = 'cubic-bezier(0.2, 0, 0, 1)';
 const HERO_FADE_MS = 200; // the grown thumbnail giving way to the real photo
@@ -172,9 +173,10 @@ interface Cached {
   isVideo: boolean;
   blob: boolean; // owns an object URL (still) that must be revoked
   // stills: ready === decoded === true once the blob resolves.
-  // videos: ready (navigable) on `loadedmetadata` while only metadata is
-  // buffered; decoded (safe to show) on `loadeddata`, after it promotes to
-  // full buffering when it becomes current.
+  // videos: ready on `loadedmetadata`; decoded (navigable, safe to show) on
+  // `loadeddata`, which webOS reaches with only metadata preloaded. Not
+  // stepped onto before: the TV decoding a clip's first frame just after the
+  // one on screen was paused blanked that one's picture.
   ready: boolean;
   decoded: boolean;
   error?: boolean; // failed to load — advance past it
@@ -182,7 +184,7 @@ interface Cached {
   el?: HTMLVideoElement; // for video: the buffering, reusable element
   clip?: ClipBox; // for video: the screen-filling box it's shown in, with its poster
   q?: VideoQuality; // for video: which stream it's playing
-  settled?: Promise<void>; // for video: resolves once ready (or failed for good)
+  settled?: Promise<void>; // for video: resolves once decoded (or failed for good)
   img?: Still; // for still: the fully-decoded, reusable <img>/canvas element
   // for still: the screen-sized still (and its src) its full original replaced
   // while zoomed; put back when another photo is zoomed (see zoomOriginal)
@@ -404,12 +406,14 @@ export function WallpaperPlayer({
   }, [viewer]);
 
   // The background music can't play alongside a clip on webOS (see duckMusic),
-  // so each clip ducks it before playing and hands it back once it ends or is
-  // left. Not when it's paused: the music coming back would take the TV's one
-  // player away from the clip and blank its frame. The viewer ducks it even
-  // before LOADING the clip it's moving onto (loadDuck): loading one, an
-  // original especially, can already cut the music off mid-song. Clips readied
-  // ahead as neighbours don't: they load metadata only, which leaves it playing.
+  // so each clip ducks it before playing and hands it back once it's off the
+  // screen (torn down, see retireRef): not when it's paused, ends or is left,
+  // as the music coming back would take the TV's one player away from the clip
+  // and blank its frame while it's still up (or fading out). The viewer ducks
+  // it even before LOADING the clip it's moving onto (loadDuck): loading one,
+  // an original especially, can already cut the music off mid-song. Clips
+  // readied ahead as neighbours don't: they load metadata only, which leaves
+  // it playing.
   const musicDucks = useRef(new Map<HTMLVideoElement, ReturnType<typeof duckMusic>>());
   const unduck = useCallback((el: HTMLVideoElement) => {
     musicDucks.current.get(el)?.release();
@@ -491,11 +495,11 @@ export function WallpaperPlayer({
     const gate = startAt.current.el === el ? startAt.current.after : undefined;
     void Promise.all([mine.faded, gate]).then(() => {
       if (musicDucks.current.get(el) !== mine) return; // handed back meanwhile
-      if (cache.current.get(iRef.current)?.el !== el) return unduck(el); // moved on
+      if (cache.current.get(iRef.current)?.el !== el) return; // moved on (see musicDucks)
       if (!wantPlay()) return; // paused during the fade: stays paused, music down
       // buffer it in full now. Not before it plays: that takes the TV's video
       // plane over as well, blanking the clip still on screen.
-      el.preload = 'auto';
+      if (el.preload !== 'auto') el.preload = 'auto';
       if (el.paused && !el.muted && takeClipWarmup()) warmUp(el);
       void el.play().catch(() => {
         if (!el.muted) {
@@ -526,6 +530,16 @@ export function WallpaperPlayer({
   layersRef.current = layers;
   // settles the last swap's fade (see showFrame)
   const fadeDone = useRef(() => {});
+  // A clip left behind is retired once the crossfade out of it has run: out
+  // of the cache at once, so coming back to it loads it afresh and it starts
+  // over under its poster like any new clip; the returned finish() tears it
+  // down and loads the fresh one if it's a neighbour. null: it's the current
+  // item again, and stays. Not picked up where it was left: the TV moves a
+  // resumed clip's time about a second before its picture is back on the
+  // plane, so the poster came off early and its black hole showed; and a
+  // clip once taken off the page (webOS then drops its pipeline) never plays
+  // again, stuck at 0:00.
+  const retireRef = useRef<(el: HTMLVideoElement) => (() => void) | null>(() => null);
   const showFrame = useCallback((f: Frame): Promise<void> => {
     // GUARD: never re-show an element that's already in the VISIBLE layer.
     // Each media element exists once; mountLayer reparents with appendChild, so
@@ -539,28 +553,43 @@ export function WallpaperPlayer({
     // immediately — play() on a hidden/detached video blacks the TV's hardware
     // video plane) while the outgoing layer stays OPAQUE on top, covering the
     // incoming frame's first layout/raster. Two painted frames later, start the
-    // outgoing 1->0 fade (see `fading`). Resolves once that fade has run (or
-    // been cut short by the next swap).
+    // outgoing 1->0 fade (see `fading`). Resolves once that fade has run (its
+    // transitionend: a busy main thread can start it late, so not a timer),
+    // or been cut short by the next swap. A clip fading out (unless it's the
+    // current item again) is then retired, and taken off the page two painted
+    // frames later, when this resolves: dropping it, or the next clip
+    // starting, blanks its picture on the TV's video plane at once, and a busy
+    // main thread can leave the screen a frame or two behind the fade.
     window.cancelAnimationFrame(fadeRaf.current);
     fadeDone.current();
     setLayers((prev) => (toA ? { a: f, b: prev.b } : { a: prev.a, b: f }));
     showARef.current = toA;
     setShowA(toA);
     setFading(false);
-    const ms = manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS;
+    const ms = visible?.el && f.el ? FADE_CLIP_MS : manualRef.current ? FADE_MANUAL_MS : FADE_AUTO_MS;
     setFadeMs(ms);
+    const left = visible?.el ? visible : null;
+    const slot = toA ? 'b' : 'a'; // the outgoing layer
     let timer = 0;
     const faded = new Promise<void>((res) => {
       fadeDone.current = () => {
         window.clearTimeout(timer);
         fadeDone.current = () => {};
-        res();
+        const finish = left ? retireRef.current(left.el!) : null;
+        if (!finish) return res();
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            setLayers((l) => (l[slot] === left ? { ...l, [slot]: null } : l));
+            finish();
+            res();
+          }),
+        );
       };
     });
     fadeRaf.current = requestAnimationFrame(() => {
       fadeRaf.current = requestAnimationFrame(() => {
         setFading(true);
-        timer = window.setTimeout(() => fadeDone.current(), ms);
+        timer = window.setTimeout(() => fadeDone.current(), ms + 1500); // (in case it never ends)
       });
     });
     return faded;
@@ -716,8 +745,8 @@ export function WallpaperPlayer({
         // hardware plane; a non-center object-position breaks the hole-punch
         // and the video renders black (fine on desktop). Face boxes for videos
         // are also detected on the thumbnail, so the data is unreliable anyway.
-        el.addEventListener('loadedmetadata', () => { e.ready = true; settle(); bump(); }, { once: true });
-        el.addEventListener('loadeddata', () => { e.decoded = true; bump(); }, { once: true });
+        el.addEventListener('loadedmetadata', () => { e.ready = true; bump(); }, { once: true });
+        el.addEventListener('loadeddata', () => { e.decoded = true; settle(); bump(); }, { once: true });
         el.addEventListener('ended', () => {
           if (iRef.current !== idx) return;
           // Left/Right still down: over on the release instead
@@ -725,7 +754,6 @@ export function WallpaperPlayer({
           else clipEnded();
         });
         el.addEventListener('waiting', () => { if (wantPlay()) playEl(el); });
-        el.addEventListener('ended', () => unduck(el));
         el.addEventListener('error', () => {
           if (e.gone) return;
           // viewer: a transcode the TV can't play falls back to the original once
@@ -841,6 +869,7 @@ export function WallpaperPlayer({
   // tear down a cached element (release the blob, stop buffering, drop the DOM node)
   const teardown = (e: Cached) => {
     e.gone = true;
+    if (e.el) unduck(e.el);
     if (e.blob) revoke(e.src);
     if (e.el) {
       e.el.pause();
@@ -851,6 +880,20 @@ export function WallpaperPlayer({
     e.clip?.free();
     if (e.img) freeStill(e.img);
     if (e.base) freeStill(e.base.img);
+  };
+
+  retireRef.current = (el) => {
+    if (closingRef.current) return null;
+    for (const [k, e] of cache.current) {
+      if (e.el !== el) continue;
+      if (k === iRef.current) return null; // back on it meanwhile
+      cache.current.delete(k);
+      return () => {
+        teardown(e);
+        if (viewer && Math.abs(k - iRef.current) === 1) void loadInto(k, true);
+      };
+    }
+    return () => {}; // (evicted already)
   };
 
   // Drop cached items outside the [i-2, i+WINDOW] window. Two behind (not one)
@@ -922,14 +965,14 @@ export function WallpaperPlayer({
   }, [assetsProp, clearCache, onShuffleChange, seen]);
 
   // An index is navigable only once its media is loaded: a still's blob is ready,
-  // or a video has its metadata (or failed, so it can be skipped).
+  // or a video has its first frame (or failed, so it can be skipped).
   const isLoaded = useCallback(
     (idx: number) => {
       const a = assets[idx];
       if (!a) return false;
       const e = cache.current.get(idx);
       if (!e) return false;
-      return e.isVideo ? e.ready : true;
+      return e.isVideo ? e.decoded || !!e.error : true;
     },
     [assets],
   );
@@ -980,7 +1023,7 @@ export function WallpaperPlayer({
       // stop the auto-advance timer so a dwell tick can't steal this intent
       window.clearTimeout(advanceTimer.current);
       void loadInto(n)
-        .then((e) => e?.settled) // a video: wait for its metadata
+        .then((e) => e?.settled) // a video: wait for its first frame
         .then(() => {
           if (navToken.current !== token) return; // a newer press took over
           setNavPending(false);
@@ -1049,6 +1092,12 @@ export function WallpaperPlayer({
     setProgress({ cur: 0, dur: 0, loaded: 0 });
     fillRun.current?.anim.cancel();
     fillRun.current = null;
+    // the item is up and quiet: its crossfade has run and, for a clip, its
+    // picture is on the plane. Loading the neighbours waits for it: each load
+    // keeps the TV's main thread busy, and a crossfade started meanwhile ran
+    // late, so the clip leaving was still up when the next one started.
+    let settle = () => {};
+    const settled = new Promise<void>((res) => (settle = res));
 
     loadInto(i)
       .then((e) => {
@@ -1058,7 +1107,7 @@ export function WallpaperPlayer({
           return scheduleNext(500); // unloadable still — skip quickly
         }
         if (!e.isVideo) {
-          showFrame({ key, asset, src: e.src, img: e.img });
+          void showFrame({ key, asset, src: e.src, img: e.img }).then(settle);
           dwellOn(intervalRef.current); // stills auto-advance on a timer
           return;
         }
@@ -1083,12 +1132,14 @@ export function WallpaperPlayer({
           // requestVideoFrameCallback/rAF scheme) left the TV's video plane
           // black.
           const faded = showFrame({ key, asset, src: e.src, el, wrap: e.clip?.box });
+          let up: Promise<void> | undefined;
           if (out?.el !== el) {
-            e.clip?.cover();
+            up = e.clip?.cover();
             startAt.current = { el, after: out?.el ? faded : undefined };
           }
           if (wantPlay()) playEl(el); // takes over the load's duck
           releaseLoadDuck();
+          void Promise.all([faded, up]).then(settle);
         };
         let revealed = false;
         const reveal = () => {
@@ -1120,7 +1171,12 @@ export function WallpaperPlayer({
         }, 2000);
       })
       .catch(() => alive && scheduleNext(500))
-      .then(prefetch);
+      .then(() => Promise.race([settled, new Promise((res) => window.setTimeout(res, SETTLE_MS))]))
+      .then(() => {
+        if (!alive) return;
+        evict(i);
+        return prefetch();
+      });
 
     // Prefetch ONE AT A TIME, nearest first, once the current frame is in:
     // loading everything at once made the frames race each other for the TV's
@@ -1148,23 +1204,13 @@ export function WallpaperPlayer({
         await loadInto(k, true);
       }
     }
-    evict(i);
 
     return () => {
       alive = false;
       window.clearInterval(stallTimer);
-      // pause the outgoing video and demote it back to metadata-only so it stops
-      // buffering while it's just a neighbour again. Not before its layer has
-      // faded out: a preload change can take its picture off the TV's video
-      // plane.
-      const out = cache.current.get(i)?.el;
-      if (out) {
-        out.pause();
-        unduck(out);
-        window.setTimeout(() => {
-          if (cache.current.get(iRef.current)?.el !== out) out.preload = 'metadata';
-        }, FADE_START_MS + FADE_AUTO_MS);
-      }
+      // pause the outgoing video; it's dropped (and hands the music back) once
+      // it has faded out (see retireRef)
+      cache.current.get(i)?.el?.pause();
     };
     // NOTE: keyed on the index and the identity of the asset AT that index —
     // NOT assets.length. onNearEnd appends to the live list, and a length dep
@@ -2221,6 +2267,9 @@ export function WallpaperPlayer({
                   : { opacity: 1, zIndex: 2, transition: 'none' }
             }
             ref={(node) => mountLayer(node, f, on)}
+            onTransitionEnd={(e) => {
+              if (!on && e.target === e.currentTarget && e.propertyName === 'opacity') fadeDone.current();
+            }}
           />
         );
       })}
@@ -2502,7 +2551,7 @@ async function applyBlurBackdrop(img: HTMLElement, id: string): Promise<void> {
 interface ClipBox {
   box: HTMLDivElement;
   ready: Promise<void>; // its poster is drawn (or can't be)
-  cover: () => void; // put the poster up until the clip's time moves
+  cover: () => Promise<void>; // put the poster up until the clip's time moves (resolves then)
   free: () => void;
 }
 
@@ -2552,6 +2601,8 @@ function clipBox(el: HTMLVideoElement, id: string, viewer: boolean): ClipBox {
   const cover = () => {
     unwatch();
     lid.classList.remove('lifted');
+    let lifted = () => {};
+    const up = new Promise<void>((res) => (lifted = res));
     // the time last seen while it plays (NaN: none since a pause, seek or reload)
     let last = el.seeking ? NaN : el.currentTime;
     const reset = () => {
@@ -2562,6 +2613,7 @@ function clipBox(el: HTMLVideoElement, id: string, viewer: boolean): ClipBox {
       if (el.currentTime > last) {
         unwatch();
         lid.classList.add('lifted');
+        lifted();
       } else last = el.currentTime;
     };
     const evs: [string, () => void][] = [['timeupdate', tick], ['seeking', reset], ['pause', reset], ['emptied', reset]];
@@ -2570,6 +2622,7 @@ function clipBox(el: HTMLVideoElement, id: string, viewer: boolean): ClipBox {
       evs.forEach(([n, f]) => el.removeEventListener(n, f));
       unwatch = () => {};
     };
+    return up;
   };
   const free = () => {
     gone = true;
