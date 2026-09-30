@@ -1929,9 +1929,8 @@ select {
   height: 100%;
   object-fit: cover;
 }
-/* a video's box: in the viewer its blurred thumbnail fills the screen and the
-   clip is sized inline to its picture; in the slideshow (.fill) the clip fills
-   it, cropped (see clipBox in WallpaperPlayer) */
+/* a viewer video's box: its blurred thumbnail fills the screen, the clip is
+   sized inline to its picture (see videoBox in WallpaperPlayer) */
 .wp-vid {
   position: absolute;
   top: 0;
@@ -1947,31 +1946,6 @@ select {
   width: 100%;
   height: 100%;
   object-fit: contain;
-}
-/* over the clip until its picture is up on the TV's video plane: the box's
-   own fill, with the clip's poster placed inline where the picture goes */
-.wp-vid-cover {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  background: inherit;
-}
-.wp-vid-cover.lifted {
-  opacity: 0;
-  transition: opacity 200ms ease;
-}
-.wp-vid-cover > canvas {
-  position: absolute;
-}
-.wp-vid.fill > video,
-.wp-vid.fill .wp-vid-cover > canvas {
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 /* Live Photo motion clip, under the current crossfade layer (whose still fades
    out to reveal it). Carries the still's blurred fill as its own background; the
