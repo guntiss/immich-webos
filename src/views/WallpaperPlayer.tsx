@@ -7,7 +7,7 @@ import {
   videoStreamUrl,
   originalUrl,
   originalStreamUrl,
-  getAssetLocation,
+  getAssetCaption,
   getAssetOrientation,
   getAssetPixels,
 } from '../api/client';
@@ -290,10 +290,10 @@ export function WallpaperPlayer({
   // Date is on the asset immediately but the place is reverse-geocoded async;
   // setting them separately re-keyed the caption twice (date now, place later)
   // and it animated in twice. Commit both once the lookup resolves.
-  const [meta, setMeta] = useState<{ loc: string | null; date: string }>({ loc: null, date: '' });
+  const [meta, setMeta] = useState<Meta>({ loc: null, desc: '', date: '' });
   // pre-geocoded results keyed by asset id so transitions can compare old vs new
   // meta before the new image shows, clearing the caption only when it changes.
-  const geoCache = useRef(new Map<string, { loc: string | null; date: string }>());
+  const geoCache = useRef(new Map<string, Meta>());
   // the asset of the frame currently ON SCREEN (in the visible layer). The caption
   // keys off THIS, not the target index, so it only appears once the image has
   // actually loaded and been revealed — never over a still-loading frame.
@@ -1072,11 +1072,11 @@ export function WallpaperPlayer({
   const prefetchGeoFor = useCallback((a: Asset) => {
     if (geoCache.current.has(a.id)) return;
     const date = fmtDate(a.createdAt);
-    getAssetLocation(a.id)
+    getAssetCaption(a.id)
       .then((r) => {
-        geoCache.current.set(a.id, { loc: fmtPlace(r), date });
+        geoCache.current.set(a.id, { loc: fmtPlace(r.location), desc: r.description, date });
       })
-      .catch(() => { geoCache.current.set(a.id, { loc: null, date }); });
+      .catch(() => { geoCache.current.set(a.id, { loc: null, desc: '', date }); });
   }, []);
 
   // load + show the current asset, prefetch around it, evict the rest
@@ -1260,12 +1260,11 @@ export function WallpaperPlayer({
     // twice), caching the result for later.
     let alive = true;
     const date = fmtDate(shownAsset.createdAt);
-    setMeta({ loc: null, date: '' });
-    getAssetLocation(shownAsset.id)
-      .then((r) => fmtPlace(r))
-      .catch(() => null)
-      .then((loc) => {
-        const result = { loc, date };
+    setMeta({ loc: null, desc: '', date: '' });
+    getAssetCaption(shownAsset.id)
+      .then((r): Meta => ({ loc: fmtPlace(r.location), desc: r.description, date }))
+      .catch((): Meta => ({ loc: null, desc: '', date }))
+      .then((result) => {
         geoCache.current.set(shownAsset.id, result);
         if (alive) setMeta(result);
       });
@@ -2119,7 +2118,7 @@ export function WallpaperPlayer({
     (!!asset.isVideo && !!cur && !cur.decoded && !cur.error);
   // key on the caption CONTENT so it only re-animates when the text changes
   // (consecutive shots from the same place/day won't re-trigger the animation)
-  const metaKey = `${meta.loc ?? ''}|${meta.date}`;
+  const metaKey = `${meta.desc}|${meta.loc ?? ''}|${meta.date}`;
   const pct = progress.dur > 0 ? (progress.cur / progress.dur) * 100 : 0;
   const bufferedPct = progress.loaded * 100;
   // previous/next arrows: hidden at the viewer's ends (the show wraps) and
@@ -2341,6 +2340,7 @@ export function WallpaperPlayer({
       {/* bottom-left caption, animates in fresh for each wallpaper (keyed by id) */}
       {meta.date && !zoomed && (
         <div class="wp-player-meta" key={metaKey}>
+          {meta.desc && <div class="wp-player-desc">{meta.desc}</div>}
           {meta.loc && <div class="wp-player-loc">{meta.loc}</div>}
           {meta.date && <div class="wp-player-date">{meta.date}</div>}
         </div>
@@ -2703,6 +2703,8 @@ function weightedShuffle<T>(a: T[], weight: (item: T) => number): void {
   }
   a.sort((x, y) => key.get(y)! - key.get(x)!);
 }
+
+type Meta = { loc: string | null; desc: string; date: string };
 
 function fmtPlace(r: { city?: string | null; state?: string | null; country?: string | null }): string | null {
   const parts = [r.city, r.state, r.country].filter(Boolean) as string[];

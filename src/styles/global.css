@@ -1984,6 +1984,16 @@ select {
      re-rasters mid-animation (that was the TV stutter) */
   animation: wp-meta-in 0.6s ease both;
 }
+.wp-player-desc {
+  font-size: 22px;
+  color: rgba(255, 255, 255, 0.95);
+  margin-bottom: 4px;
+  /* long captions wrap, capped so they can't climb over the picture */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
 .wp-player-loc {
   font-size: 26px;
   font-weight: 700;

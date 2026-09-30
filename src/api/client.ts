@@ -500,6 +500,8 @@ export interface AssetLocation {
 
 interface AssetInfo {
   location: AssetLocation;
+  // The user's own caption (Immich's "description"), trimmed; '' when unset.
+  description: string;
   // EXIF orientation, normalised to 1 (upright) when absent or unparseable.
   // Immich returns it as a string; anything other than 1 means the pixels are
   // stored rotated or mirrored relative to how they should be displayed.
@@ -526,6 +528,7 @@ function getAssetInfo(id: string): Promise<AssetInfo> {
 async function fetchAssetInfo(id: string): Promise<AssetInfo> {
   const a = await jsonReq<{
     exifInfo?: {
+      description?: string | null;
       city?: string;
       state?: string;
       country?: string;
@@ -541,6 +544,7 @@ async function fetchAssetInfo(id: string): Promise<AssetInfo> {
       state: a.exifInfo?.state ?? undefined,
       country: a.exifInfo?.country ?? undefined,
     },
+    description: (a.exifInfo?.description ?? '').trim(),
     // A tag we can't read is treated as rotated: displaying a correctly-
     // oriented photo via the preview costs sharpness, showing a rotated one
     // costs the shot.
@@ -550,8 +554,9 @@ async function fetchAssetInfo(id: string): Promise<AssetInfo> {
   return info;
 }
 
-export async function getAssetLocation(id: string): Promise<AssetLocation> {
-  return (await getAssetInfo(id)).location;
+export async function getAssetCaption(id: string): Promise<{ location: AssetLocation; description: string }> {
+  const { location, description } = await getAssetInfo(id);
+  return { location, description };
 }
 
 export async function getAssetOrientation(id: string): Promise<number> {
