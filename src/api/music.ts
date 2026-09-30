@@ -20,7 +20,7 @@ export const GENRES = [
   { label: 'Classical', tag: 'classical' },
 ];
 const DEFAULT_GENRE = 'lofi';
-const VOLUME = 0.7; // background level, under the TV's own volume
+const VOLUME = 0.5; // background level, under the TV's own volume
 const DUCK_MS = 350; // fade out before a video starts
 const UNDUCK_MS = 1000; // fade back in once it stops
 const UNDUCK_DELAY_MS = 300; // so stepping from one video to the next doesn't bounce it
