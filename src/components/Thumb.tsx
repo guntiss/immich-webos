@@ -10,6 +10,10 @@ interface Props {
   isVideo: boolean;
   duration?: number | string | null;
   isLive?: boolean;
+  // Set on a cell in a horizontal row (the Home page) rather than the timeline
+  // grid: Left/Right stay inside the row, and its thumbnail loads at once (the
+  // row's own scroller would hide it from the grid's lazy-load observer).
+  row?: string;
   width: number;
   height: number;
   onSelect: () => void;
@@ -18,14 +22,14 @@ interface Props {
 // Single justified-grid cell sized to explicit width/height (aspect preserved
 // by the parent's justified-row math). Lazily fetches its thumbnail blob when
 // near the viewport. Marked focusable for remote nav.
-export function Thumb({ assetId, thumbhash, isVideo, duration, isLive, width, height, onSelect }: Props) {
+export function Thumb({ assetId, thumbhash, isVideo, duration, isLive, row, width, height, onSelect }: Props) {
   const ref = useRef<HTMLButtonElement>(null);
   const [src, setSrc] = useState<string | null>(null);
-  const [near, setNear] = useState(false);
+  const [near, setNear] = useState(!!row);
 
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || row) return;
     // Load once when the cell enters the 2-page window, then stop observing and
     // keep the src for the life of the component. We deliberately do NOT drop it
     // when it scrolls away: a loaded thumb then goes static (no fetch/decode/
@@ -67,7 +71,8 @@ export function Thumb({ assetId, thumbhash, isVideo, duration, isLive, width, he
     <button
       ref={ref}
       data-focusable
-      data-seq
+      data-seq={row ? undefined : true}
+      data-row={row}
       data-asset-id={assetId}
       class="thumb focusable"
       style={{ width: `${width}px`, height: `${height}px` }}

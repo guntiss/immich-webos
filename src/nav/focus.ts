@@ -330,6 +330,17 @@ export function nextInDirection(dir: Direction): HTMLElement | null {
     return null;
   }
 
+  // Cells in a horizontal row (Home page) share a data-row id: Left/Right walk
+  // that row only, and stop at its ends (the caller reveals the sidebar at the
+  // left edge) rather than hopping to whatever card sits nearest in another
+  // row. Up/down stay geometric.
+  if (active.hasAttribute('data-row') && (dir === 'left' || dir === 'right')) {
+    const row = active.getAttribute('data-row');
+    const step = dir === 'right' ? 1 : -1;
+    const el = list[list.indexOf(active) + step];
+    return el && el.getAttribute('data-row') === row && visible(el) ? el : null;
+  }
+
   // Header controls (album Back + the sort toggle) sit at opposite ends of the
   // same top row with the grid between/below them, so pure geometry scores a
   // near grid thumbnail over the far-across sibling. Pair them explicitly:

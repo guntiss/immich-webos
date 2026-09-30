@@ -28,6 +28,7 @@ import { IconName } from '../components/icons';
 import { Sidebar, Route } from '../components/Sidebar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Albums, AlbumsRestore } from './Albums';
+import { HomeFeed } from './HomeFeed';
 import { Search } from './Search';
 import { WallpaperPlayer } from './WallpaperPlayer';
 import { Wallpaper } from './Wallpaper';
@@ -36,6 +37,7 @@ import { useRemote } from '../nav/useRemote';
 import { setRoot, focusables, focus, elementInViewport, focusVisibleContent } from '../nav/focus';
 import { exitApp } from '../nav/exit';
 import { startMusic, stopMusic } from '../api/music';
+import { clearSuggestions } from '../api/suggestions';
 
 // The Photos view's filter: both photos and videos (the default each time the
 // app opens), or only one kind. Cycled by the header button.
@@ -63,7 +65,7 @@ interface Viewer {
 // returns focus to the content. Back closes viewer, then open album, then
 // collapses the sidebar.
 export function Home({ onLogout }: { onLogout: () => void }) {
-  const [route, setRoute] = useState<Route>('timeline');
+  const [route, setRoute] = useState<Route>('home');
   const [album, setAlbum] = useState<Album | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -212,9 +214,9 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     setRoot(rootRef.current);
     setSortHidden(false); // switching view resets to top → show the button
-    // Returning to the albums list restores its own scroll + focus (see Albums);
-    // don't yank focus to the first card in that case.
-    if (!album && route === 'albums' && albumsRestore.current) return;
+    // Returning to the albums list or the home page restores its own scroll +
+    // focus (see Albums, HomeFeed); don't yank focus to the first card then.
+    if (!album && (route === 'albums' || route === 'home') && albumsRestore.current) return;
     setTimeout(() => focusFirstContent(), 0);
   }, [route, album]);
 
@@ -391,6 +393,14 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // is up — the fullscreen viewer, the logout dialog, or the wallpaper slideshow
   useRemote({ onBack, onEdge, enabled: !viewer && !confirmLogout && !wpFullscreen });
 
+  // Opens an album from a list page, remembering that page's scroll (its
+  // scroller found by `scroller`) so Back returns to the same spot.
+  const openAlbumFrom = (scroller: string) => (a: Album) => {
+    const el = rootRef.current?.querySelector<HTMLElement>(scroller);
+    albumsRestore.current = { scrollTop: el?.scrollTop ?? 0, albumId: a.id };
+    setAlbum(a);
+  };
+
   const navigate = (r: Route) => {
     albumsRestore.current = null;
     setAlbum(null);
@@ -417,6 +427,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     setConfirmLogout(false);
     await logout();
     await clearStoredThumbs();
+    clearSuggestions();
     clearSession();
     onLogout();
   };
@@ -554,6 +565,18 @@ export function Home({ onLogout }: { onLogout: () => void }) {
                 onAssetsChange={handleAssetsChange}
               />
             </div>
+          ) : route === 'home' ? (
+            <HomeFeed
+              onOpen={(assets, index) => {
+                loadNextRef.current = null; // a grid's paging hook, stale here
+                openViewer(assets, index);
+              }}
+              onOpenAlbum={openAlbumFrom('.feed')}
+              restore={albumsRestore.current}
+              onRestored={() => {
+                albumsRestore.current = null;
+              }}
+            />
           ) : route === 'timeline' ? (
             <PhotoGrid
               loadBuckets={loadTimelineBuckets}
@@ -586,15 +609,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           ) : (
             <Albums
               order={sort.albums}
-              onOpenAlbum={(a) => {
-                const grid =
-                  rootRef.current?.querySelector<HTMLElement>('.album-grid');
-                albumsRestore.current = {
-                  scrollTop: grid?.scrollTop ?? 0,
-                  albumId: a.id,
-                };
-                setAlbum(a);
-              }}
+              onOpenAlbum={openAlbumFrom('.album-grid')}
               restore={albumsRestore.current}
               onRestored={() => {
                 albumsRestore.current = null;

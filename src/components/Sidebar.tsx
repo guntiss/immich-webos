@@ -8,7 +8,7 @@ import pkg from '../../package.json';
 
 const APP_VERSION = 'v' + pkg.version;
 
-export type Route = 'timeline' | 'albums' | 'favorites' | 'search' | 'wallpaper';
+export type Route = 'home' | 'timeline' | 'albums' | 'favorites' | 'search' | 'wallpaper';
 
 interface Item {
   route: Route;
@@ -17,6 +17,7 @@ interface Item {
 }
 
 const ITEMS: Item[] = [
+  { route: 'home', label: 'Home', icon: 'home' },
   { route: 'timeline', label: 'Photos', icon: 'photos' },
   { route: 'search', label: 'Search', icon: 'search' },
   { route: 'albums', label: 'Albums', icon: 'albums' },

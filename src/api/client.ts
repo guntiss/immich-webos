@@ -47,6 +47,10 @@ export interface Album {
   shared: boolean;
   startDate?: string;
   endDate?: string;
+  // When photos were last added / the album last changed (the home page's
+  // "recently updated" order). Older servers may omit either.
+  lastModifiedAssetTimestamp?: string;
+  updatedAt?: string;
 }
 
 function base(): string {

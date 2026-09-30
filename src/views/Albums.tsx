@@ -90,10 +90,13 @@ export function AlbumCard({
   album,
   onSelect,
   checked,
+  row,
 }: {
   album: Album;
   onSelect: () => void;
   checked?: boolean;
+  // set on a card in a horizontal row (the Home page): Left/Right stay in it
+  row?: string;
 }) {
   const [src, setSrc] = useState<string | null>(null);
 
@@ -112,6 +115,7 @@ export function AlbumCard({
     <button
       data-focusable
       data-album-id={album.id}
+      data-row={row}
       class="album-card focusable"
       aria-pressed={checked}
       onClick={onSelect}

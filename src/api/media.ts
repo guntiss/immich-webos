@@ -57,7 +57,7 @@ const fetchSlot = gate(16);
 const readSlot = gate(8);
 
 // Runs at most `limit` jobs at once and queues the rest in order.
-function gate(limit: number): <T>(job: () => Promise<T>) => Promise<T> {
+export function gate(limit: number): <T>(job: () => Promise<T>) => Promise<T> {
   let active = 0;
   const queue: Array<() => void> = [];
   const runNext = () => {

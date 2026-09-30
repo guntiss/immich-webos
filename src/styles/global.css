@@ -1362,6 +1362,51 @@ select {
   background: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent);
 }
 
+/* ---------- Home: rows of suggestions ---------- */
+.feed {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px 0 80px;
+}
+.feed-row {
+  margin-bottom: 18px;
+  /* rows fade in as their data resolves, after the view's own transition */
+  animation: view-enter 0.28s ease both;
+}
+.feed-head {
+  display: flex;
+  align-items: baseline;
+  padding: 0 30px;
+}
+.feed-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+}
+.feed-sub {
+  margin-left: 16px;
+  font-size: 18px;
+  color: var(--muted);
+}
+/* Vertical padding leaves room for the focus ring, which the scroller would
+   otherwise clip. */
+.feed-scroller {
+  display: flex;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 12px 24px 14px;
+}
+.feed-scroller > * + * {
+  margin-left: 18px;
+}
+.feed-scroller .thumb {
+  border-radius: 10px;
+}
+.feed-scroller .album-card {
+  flex: 0 0 auto;
+  width: 320px;
+}
+
 /* Result header (person/place/text search): back chip + heading */
 .result-head {
   display: flex;
