@@ -856,10 +856,89 @@ select {
 }
 
 /* ---------- Justified grid ---------- */
+/* Positions the timeline scrubber against the scrolling grid beside it. */
+.grid-wrap {
+  position: relative;
+  height: 100%;
+}
 .grid-scroll {
   height: 100%;
   overflow-y: auto;
   padding: 20px 16px 80px;
+}
+
+/* Timeline scrubber: a thin strip along the grid's right edge, thumb sized to
+   the viewport's share of the scroll range like a native scrollbar (which
+   this app otherwise hides, see ::-webkit-scrollbar). The element is a wide
+   transparent hit target so the magic-remote pointer can grab it easily; the
+   painted track is the slim bar at its center (same "fat hit box, thin visual"
+   trick as .wp-edge-progress for the video seek bar). Click or drag it to jump
+   straight to a point in the timeline instead of scrolling through it. */
+.timeline-scrubber {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 36px;
+  z-index: 3;
+  cursor: pointer;
+  touch-action: none;
+}
+.ts-track {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  right: 10px;
+  width: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  transition: background 0.15s ease;
+}
+.timeline-scrubber:hover .ts-track,
+.timeline-scrubber.active .ts-track {
+  background: rgba(255, 255, 255, 0.16);
+}
+.ts-thumb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-radius: 2px;
+  background: var(--muted);
+  transition: background 0.15s ease, width 0.15s ease;
+}
+.timeline-scrubber:hover .ts-thumb,
+.timeline-scrubber.active .ts-thumb {
+  background: var(--immich-dark-primary);
+  left: -3px;
+  right: -3px;
+}
+/* Year markers: small ticks in the track's dead space, to the left of the bar. */
+.ts-year {
+  position: absolute;
+  right: 14px;
+  transform: translateY(-50%);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0.8;
+}
+/* Floating month/year pill that follows the thumb while dragging. */
+.ts-label {
+  position: absolute;
+  right: 46px;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--surface-2);
+  padding: 8px 16px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 4;
 }
 .bucket {
   /* keep each date section's layout self-contained so loading one bucket
@@ -1066,10 +1145,13 @@ select {
   color: var(--muted);
 }
 /* grid fills the space under the header instead of its default full height */
-.album-view > .grid-scroll {
+.album-view > .grid-wrap {
   flex: 1;
   min-height: 0;
   height: auto;
+}
+.album-view > .grid-wrap > .grid-scroll {
+  height: 100%;
   padding-top: 6px;
 }
 

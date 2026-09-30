@@ -7,6 +7,7 @@ import { bucketObserver, setLazyRoot } from './lazyObserver';
 import { justify, targetRowHeight, GRID_GAP as GAP } from './justified';
 import { reportError } from './ErrorBoundary';
 import { EmptyState } from './EmptyState';
+import { TimelineScrubber } from './TimelineScrubber';
 
 const DAY_SEP = 5; // px gap inserted between day-groups on a shared row
 const LABEL_GAP = 24; // min px between one day label's end and the next one's start
@@ -179,28 +180,31 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
   }
 
   return (
-    <div
-      class="grid-scroll"
-      ref={setScroller}
-      // Clicking empty space (gaps, padding, bucket titles) would otherwise
-      // move focus to <body> and drop the focus ring off the current thumbnail.
-      // Suppressing focus shift on mousedown for non-focusable targets keeps the
-      // last thumbnail focused; clicks that land on a thumb still focus/open it.
-      onMouseDown={(e) => {
-        if (!(e.target as HTMLElement).closest('[data-focusable]')) e.preventDefault();
-      }}
-    >
-      {buckets.map((b) => (
-        <BucketSection
-          key={b.timeBucket}
-          bucket={b}
-          assets={loaded[b.timeBucket]}
-          width={width}
-          rowH={rowH}
-          ensureBucket={ensureBucket}
-          onOpen={handleOpen}
-        />
-      ))}
+    <div class="grid-wrap">
+      <div
+        class="grid-scroll"
+        ref={setScroller}
+        // Clicking empty space (gaps, padding, bucket titles) would otherwise
+        // move focus to <body> and drop the focus ring off the current thumbnail.
+        // Suppressing focus shift on mousedown for non-focusable targets keeps the
+        // last thumbnail focused; clicks that land on a thumb still focus/open it.
+        onMouseDown={(e) => {
+          if (!(e.target as HTMLElement).closest('[data-focusable]')) e.preventDefault();
+        }}
+      >
+        {buckets.map((b) => (
+          <BucketSection
+            key={b.timeBucket}
+            bucket={b}
+            assets={loaded[b.timeBucket]}
+            width={width}
+            rowH={rowH}
+            ensureBucket={ensureBucket}
+            onOpen={handleOpen}
+          />
+        ))}
+      </div>
+      <TimelineScrubber buckets={buckets} scrollRef={scrollRef} />
     </div>
   );
 });
@@ -267,7 +271,7 @@ const BucketSection = memo(function BucketSection({
   let bucketIdx = 0;
 
   return (
-    <section ref={ref} class="bucket">
+    <section ref={ref} class="bucket" data-bucket={tb}>
       {assets ? (
         units.map(({ assets: unitAssets, seps }, ui) => {
           let effWidth = width;
