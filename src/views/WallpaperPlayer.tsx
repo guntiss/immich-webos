@@ -13,6 +13,7 @@ import {
 } from '../api/client';
 import { Key, isBack, dirFromKey } from '../nav/keys';
 import { duckMusic, takeClipWarmup, useMusic } from '../api/music';
+import { takeWarmClip } from '../api/warmClip';
 import { keepAwake } from '../api/screensaver';
 import { Icon } from '../components/Icon';
 import type { PlaceOf } from '../components/PhotoGrid';
@@ -177,6 +178,7 @@ interface Cached {
   decoded: boolean;
   error?: boolean; // failed to load — advance past it
   gone?: boolean; // torn down: its element's late events are ignored
+  played?: boolean; // for video: it has been set playing (see dropStale)
   el?: HTMLVideoElement; // for video: the buffering, reusable element
   wrap?: HTMLDivElement; // for viewer video: the screen-filling box it's shown in (see videoBox)
   q?: VideoQuality; // for video: which stream it's playing
@@ -658,12 +660,20 @@ export function WallpaperPlayer({
       if (!a) return null;
 
       if (a.isVideo) {
-        if (viewer && !ahead) await duckForLoad(idx);
-        const el = document.createElement('video');
         // the viewer streams the quality last picked; its clips play with their
         // own sound; the slideshow keeps them muted
         const q: VideoQuality = viewer ? getVideoQuality() : 'transcoded';
-        el.src = q === 'original' ? originalStreamUrl(a.id) : videoStreamUrl(a.id);
+        // A clip the grid began loading when its thumbnail took the focus (see
+        // warmClip) is taken over as it is, loading or loaded. Nothing then
+        // waits for the music to fade out: that goes on beside the viewer
+        // opening, and the clip plays once it's done (see playEl).
+        const warm = viewer && !ahead ? takeWarmClip(a.id, q) : null;
+        if (viewer && !ahead) {
+          const faded = duckForLoad(idx);
+          if (!warm) await faded;
+        }
+        const el = warm ?? document.createElement('video');
+        if (!warm) el.src = q === 'original' ? originalStreamUrl(a.id) : videoStreamUrl(a.id);
         el.muted = !viewer;
         if (viewer) el.style.objectFit = 'contain'; // the whole frame, not a crop
         el.playsInline = true;
@@ -690,6 +700,11 @@ export function WallpaperPlayer({
         // are also detected on the thumbnail, so the data is unreliable anyway.
         el.addEventListener('loadedmetadata', () => { e.ready = true; settle(); bump(); }, { once: true });
         el.addEventListener('loadeddata', () => { e.decoded = true; bump(); }, { once: true });
+        // a clip taken over loaded already has missed those events
+        if (warm) {
+          if (el.readyState >= 1) { e.ready = true; settle(); }
+          if (el.readyState >= 2) e.decoded = true;
+        }
         el.addEventListener('ended', () => {
           if (iRef.current !== idx) return;
           // Left/Right still down: over on the release instead
@@ -708,7 +723,7 @@ export function WallpaperPlayer({
           bump();
           if (iRef.current === idx) advanceRef.current();
         });
-        el.load();
+        if (!warm) el.load();
         return e;
       }
 
@@ -825,6 +840,16 @@ export function WallpaperPlayer({
     if (e.base) freeStill(e.base.img);
   };
 
+  // A clip that has played and since left the page (its layer taken over by
+  // another clip) is dead to the TV: put back and played, it reads 0:00 and
+  // never moves. So it's let go and loaded afresh when it's wanted again.
+  const dropStale = useCallback((idx: number) => {
+    const e = cache.current.get(idx);
+    if (!e?.played || !e.el || e.el.isConnected) return;
+    teardown(e);
+    cache.current.delete(idx);
+  }, []);
+
   // Drop cached items outside the [i-2, i+WINDOW] window. Two behind (not one)
   // so a couple of Left presses land instantly instead of re-fetching originals.
   const evict = useCallback((center: number) => {
@@ -936,6 +961,7 @@ export function WallpaperPlayer({
       // retry loop polls until onNearEnd has appended more
       if (n === iRef.current) return false;
       navToken.current++; // supersede any pending manual nav
+      dropStale(n);
       if (isLoaded(n)) {
         setNavPending(false);
         window.clearTimeout(advanceTimer.current);
@@ -967,7 +993,7 @@ export function WallpaperPlayer({
         });
       return false;
     },
-    [targetIndex, isLoaded, loadInto, viewer],
+    [targetIndex, isLoaded, loadInto, dropStale, viewer],
   );
 
   // Auto-advance: try to step forward; if the next frame isn't loaded yet, keep
@@ -1050,7 +1076,10 @@ export function WallpaperPlayer({
           // earlier requestVideoFrameCallback/rAF scheme) left the TV's video
           // plane black. The earlier black frames this deferral chased were the
           // element-steal bug, fixed properly in showFrame/the show effect.
-          if (wantPlay()) playEl(el); // takes over the load's duck
+          if (wantPlay()) {
+            e.played = true;
+            playEl(el); // takes over the load's duck
+          }
           releaseLoadDuck();
           showFrame({ key, asset, src: e.src, el, wrap: e.wrap });
         };
@@ -1101,6 +1130,7 @@ export function WallpaperPlayer({
           if (viewer ? k === i + 2 : vids >= 1) continue;
           vids++;
         }
+        dropStale(k);
         await loadInto(k, true);
       }
     }

@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'preact/hooks';
 import { loadThumb } from '../api/media';
+import { blurClip, focusClip } from '../api/warmClip';
 import { thumbObserver } from './lazyObserver';
 import { Icon } from './Icon';
 
@@ -77,6 +78,9 @@ export function Thumb({ assetId, thumbhash, isVideo, duration, isLive, row, widt
       class="thumb focusable"
       style={{ width: `${width}px`, height: `${height}px` }}
       onClick={onSelect}
+      // a clip under the focus starts loading, ready for the viewer (see warmClip)
+      onFocus={isVideo ? () => focusClip(assetId) : undefined}
+      onBlur={isVideo ? blurClip : undefined}
     >
       {src ? (
         // No loading="lazy": we already gate the fetch via IntersectionObserver
