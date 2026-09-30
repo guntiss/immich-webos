@@ -2124,16 +2124,23 @@ select {
   opacity: 1;
 }
 /* the viewer's slideshow: a photo's dwell filling the line (scaled, not
-   resized, so it animates on the compositor). Thinner than a video's line,
-   and the same with the controls up or hidden. Held a little off the bottom
-   edge: the TV crops a few px there, 2-3 and drifting (OLED Screen Shift),
-   which hid a line on the edge now and then. */
+   resized, so it animates on the compositor). Thinner than a video's line.
+   Held a little off the bottom edge: the TV crops a few px there, 2-3 and
+   drifting (OLED Screen Shift), which hid a line on the edge now and then.
+   Dimmed while the controls are hidden so it doesn't distract during normal
+   viewing; brightens along with the rest of the UI when controls are up. */
 .wp-edge-progress.dwell {
   pointer-events: none;
+  opacity: 0.35;
+  transition: opacity 0.2s ease;
+}
+.wp-player.show-ui .wp-edge-progress.dwell {
+  opacity: 1;
 }
 .wp-player .wp-edge-progress.dwell .wp-edge-track {
   bottom: 5px;
   height: 2px;
+  background: transparent; /* only the fill shows; no grey track when subtle */
 }
 .wp-edge-progress.dwell .wp-edge-fill {
   transform-origin: 0 0;
