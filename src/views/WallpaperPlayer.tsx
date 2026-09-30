@@ -77,7 +77,7 @@ const BAR_IDLE_MS = 8000; // drop a picked control group (see Group) after this 
 const FADE_AUTO_MS = 900; // crossfade on an automatic advance
 const FADE_MANUAL_MS = 500; // quicker crossfade when stepping with the remote
 const FADE_CLIP_MS = 150; // a clip replacing a clip: it starts playing only after this (see the show effect)
-const POSTER_WAIT_MS = 1000; // a clip waits this long at most for its poster (see clipBox)
+const POSTER_WAIT_MS = 300; // a clip waits this long at most for its poster (see clipBox)
 const SETTLE_MS = 3000; // prefetching waits this long at most for the item shown to settle (see the show effect)
 const HERO_MS = 320; // a photo growing out of / shrinking back into its grid cell
 const HERO_EASE = 'cubic-bezier(0.2, 0, 0, 1)';
@@ -535,12 +535,12 @@ export function WallpaperPlayer({
   // A clip left behind is retired once the crossfade out of it has run: out
   // of the cache at once, so coming back to it loads it afresh and it starts
   // over under its poster like any new clip; the returned finish() tears it
-  // down and loads the fresh one if it's a neighbour. null: it's the current
-  // item again, and stays. Not picked up where it was left: the TV moves a
-  // resumed clip's time about a second before its picture is back on the
-  // plane, so the poster came off early and its black hole showed; and a
-  // clip once taken off the page (webOS then drops its pipeline) never plays
-  // again, stuck at 0:00.
+  // down (the prefetch then loads the fresh one if it's a neighbour). null:
+  // it's the current item again, and stays. Not picked up where it was left:
+  // the TV moves a resumed clip's time about a second before its picture is
+  // back on the plane, so the poster came off early and its black hole showed;
+  // and a clip once taken off the page (webOS then drops its pipeline) never
+  // plays again, stuck at 0:00.
   const retireRef = useRef<(el: HTMLVideoElement) => (() => void) | null>(() => null);
   const showFrame = useCallback((f: Frame): Promise<void> => {
     // GUARD: never re-show an element that's already in the VISIBLE layer.
@@ -890,10 +890,7 @@ export function WallpaperPlayer({
       if (e.el !== el) continue;
       if (k === iRef.current) return null; // back on it meanwhile
       cache.current.delete(k);
-      return () => {
-        teardown(e);
-        if (viewer && Math.abs(k - iRef.current) === 1) void loadInto(k, true);
-      };
+      return () => teardown(e);
     }
     return () => {}; // (evicted already)
   };
@@ -1095,9 +1092,10 @@ export function WallpaperPlayer({
     fillRun.current?.anim.cancel();
     fillRun.current = null;
     // the item is up and quiet: its crossfade has run and, for a clip, its
-    // picture is on the plane. Loading the neighbours waits for it: each load
-    // keeps the TV's main thread busy, and a crossfade started meanwhile ran
-    // late, so the clip leaving was still up when the next one started.
+    // picture is on the plane (see the clip's show below). Loading the
+    // neighbours waits for it: each load keeps the TV's main thread busy, and a
+    // crossfade started meanwhile ran late, so the clip leaving was still up
+    // when the next one started.
     let settle = () => {};
     const settled = new Promise<void>((res) => (settle = res));
 
@@ -1141,7 +1139,11 @@ export function WallpaperPlayer({
           }
           if (wantPlay()) playEl(el); // takes over the load's duck
           releaseLoadDuck();
-          void Promise.all([faded, up]).then(settle);
+          // A clip replacing a clip has the next ones loaded as soon as it
+          // plays, so the next press finds one ready; a clip coming up from a
+          // photo or the grid waits for its picture first: it starts about a
+          // fifth of a second later with them loading beside it.
+          void Promise.all([faded, out?.el ? undefined : up]).then(settle);
         };
         let revealed = false;
         const reveal = () => {
