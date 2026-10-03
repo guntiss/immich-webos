@@ -19,8 +19,10 @@ const tileWidth = (a: Asset): number =>
 // The rows to show: builders finish in any order but the page only shows a
 // finished prefix of them, so a late row never pushes in above one already on
 // screen. A photo or album already shown higher up is left out of later rows,
-// so each appears once (the viewer finds its tile by asset id).
-function visibleRows(slots: (FeedRow[] | undefined)[]): FeedRow[] {
+// so each appears once (the viewer finds its tile by asset id). `keep` is the
+// photos/videos filter: photo rows keep only that kind and a row left empty
+// goes; album rows stay, an album holds both.
+function visibleRows(slots: (FeedRow[] | undefined)[], keep?: (a: Asset) => boolean): FeedRow[] {
   const photos = new Set<string>();
   const albums = new Set<string>();
   const out: FeedRow[] = [];
@@ -33,7 +35,7 @@ function visibleRows(slots: (FeedRow[] | undefined)[]): FeedRow[] {
         fresh.forEach((a) => albums.add(a.id));
         if (fresh.length) out.push({ ...row, albums: fresh });
       } else {
-        const fresh = row.assets.filter((a) => !photos.has(a.id));
+        const fresh = row.assets.filter((a) => (!keep || keep(a)) && !photos.has(a.id));
         fresh.forEach((a) => photos.add(a.id));
         if (fresh.length) out.push({ ...row, assets: fresh });
       }
@@ -51,7 +53,9 @@ export function HomeFeed({
   onOpenAlbum,
   restore,
   onRestored,
+  keep,
 }: {
+  keep?: (a: Asset) => boolean;
   onOpen: (assets: Asset[], index: number) => void;
   onOpenAlbum: (album: Album) => void;
   restore?: AlbumsRestore | null;
@@ -72,7 +76,7 @@ export function HomeFeed({
     );
   }, []);
 
-  const rows = useMemo(() => visibleRows(slots), [slots]);
+  const rows = useMemo(() => visibleRows(slots, keep), [slots, keep]);
 
   // Back from an opened album: put the page's scroll and focus back on its card.
   // Focus first (its instant retarget scrolls the card into its row), then set
@@ -94,8 +98,12 @@ export function HomeFeed({
   if (!rows.length) {
     return done ? (
       <EmptyState
-        title="Nothing to show yet"
-        hint="Albums shared with this account, and photos in them, will be suggested here."
+        title={keep ? 'Nothing of that kind to suggest yet' : 'Nothing to show yet'}
+        hint={
+          keep
+            ? 'Switch the filter in the top corner to see everything.'
+            : 'Albums shared with this account, and photos in them, will be suggested here.'
+        }
       />
     ) : (
       <div class="msg">Loading…</div>

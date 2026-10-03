@@ -9,7 +9,7 @@ import {
   logout,
   Album,
   getTimelineStats,
-  TimelineStats,
+  getAlbumKindCount,
 } from '../api/client';
 import { clearSession, getUser } from '../auth/store';
 import {
@@ -109,6 +109,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     : route === 'timeline' || route === 'favorites' || route === 'albums'
       ? route
       : null;
+  const hasFilter = section === 'timeline' || section === 'album' || (!album && route === 'home');
   // Hide the sort button while scrolling down, reveal it on scroll up — keeps it
   // out of the way mid-browse but a flick up brings it back. Scroll events don't
   // bubble, so listen in the capture phase on the shell and read the scrolling
@@ -272,15 +273,15 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   // whole buckets come in and the grid keeps the one kind. Until a bucket
   // loads, its count only sizes its placeholder, so it's scaled by the
   // library's share of that kind; the viewer's total comes from the same
-  // statistics.
-  const statsRef = useRef<TimelineStats | null>(null);
+  // statistics (keptTotal; 0 when unfiltered or unknown). Albums do the same.
+  const keptTotal = useRef(0);
   const loadTimelineBuckets = useCallback(async () => {
     const buckets = await getTimelineBuckets(sort.timeline);
-    statsRef.current = null;
+    keptTotal.current = 0;
     if (mediaFilter === 'all') return buckets;
     const st = await getTimelineStats().catch(() => null);
-    statsRef.current = st;
-    const share = st && st.total > 0 ? (mediaFilter === 'videos' ? st.videos : st.images) / st.total : 1;
+    if (st) keptTotal.current = mediaFilter === 'videos' ? st.videos : st.images;
+    const share = st && st.total > 0 ? keptTotal.current / st.total : 1;
     return buckets.map((b) => ({ ...b, count: Math.max(1, Math.round(b.count * share)) }));
   }, [sort.timeline, mediaFilter]);
   const loadTimelineBucket = useCallback((tb: string) => getBucket(tb, sort.timeline), [sort.timeline]);
@@ -295,27 +296,42 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   );
   const mediaFilterRef = useRef(mediaFilter);
   mediaFilterRef.current = mediaFilter;
-  const openTimelineViewer = useCallback(
-    (assets: Asset[], index: number, placeOf?: PlaceOf) => {
-      const st = statsRef.current;
-      const f = mediaFilterRef.current;
-      const total = !st || f === 'all' ? 0 : f === 'videos' ? st.videos : st.images;
-      openViewer(
-        assets,
-        index,
-        placeOf && total
-          ? (id) => {
-              const p = placeOf(id);
-              return p && { n: p.n, total };
-            }
-          : placeOf,
-      );
-    },
-    [openViewer],
+  // The viewer's "n / total" counts the kept kind only when a filter is on.
+  const withKeptTotal = useCallback(
+    (open: (assets: Asset[], index: number, placeOf?: PlaceOf) => void) =>
+      (assets: Asset[], index: number, placeOf?: PlaceOf) => {
+        const total = mediaFilterRef.current === 'all' ? 0 : keptTotal.current;
+        open(
+          assets,
+          index,
+          placeOf && total
+            ? (id) => {
+                const p = placeOf(id);
+                return p && { n: p.n, total };
+              }
+            : placeOf,
+        );
+      },
+    [],
+  );
+  const openTimelineViewer = useMemo(() => withKeptTotal(openViewer), [withKeptTotal, openViewer]);
+  const openFilteredAlbumViewer = useMemo(
+    () => withKeptTotal(openAlbumViewer),
+    [withKeptTotal, openAlbumViewer],
   );
   const loadFavoriteBuckets = useCallback(() => getFavoriteBuckets(sort.favorites), [sort.favorites]);
   const loadFavoriteBucket = useCallback((tb: string) => getFavoriteBucket(tb, sort.favorites), [sort.favorites]);
-  const loadAlbumBuckets = useCallback(() => getAlbumBuckets(albumId!, sort.album), [albumId, sort.album]);
+  const loadAlbumBuckets = useCallback(async () => {
+    const buckets = await getAlbumBuckets(albumId!, sort.album);
+    keptTotal.current = 0;
+    if (mediaFilter === 'all') return buckets;
+    const kept = await getAlbumKindCount(albumId!, mediaFilter === 'videos' ? 'VIDEO' : 'IMAGE').catch(() => null);
+    if (kept == null) return buckets;
+    keptTotal.current = kept;
+    const all = buckets.reduce((n, b) => n + b.count, 0);
+    const share = all > 0 ? kept / all : 1;
+    return buckets.map((b) => ({ ...b, count: Math.max(1, Math.round(b.count * share)) }));
+  }, [albumId, sort.album, mediaFilter]);
   const loadAlbumBucket = useCallback((tb: string) => getAlbumBucket(albumId!, tb, sort.album), [albumId, sort.album]);
 
   // Close the viewer and return focus to the thumbnail of the photo last shown
@@ -498,13 +514,14 @@ export function Home({ onLogout }: { onLogout: () => void }) {
             <Icon name={sort[section] === 'asc' ? 'sortAsc' : 'sortDesc'} size={28} />
           </button>
         )}
-        {/* Photos: the photos/videos filter, left of the sort button */}
-        {section === 'timeline' && (
+        {/* Home, Photos and an opened album: the photos/videos filter, left of the
+            sort button (alone in the corner on Home, which has none) */}
+        {hasFilter && (
           <button
             data-focusable
             data-noautofocus
             data-header-nav
-            class={'filter-btn focusable' + (sortHidden ? ' hidden' : '')}
+            class={'filter-btn focusable' + (section ? '' : ' solo') + (sortHidden ? ' hidden' : '')}
             onClick={cycleMediaFilter}
             aria-label={MEDIA_LABEL[mediaFilter]}
             title={MEDIA_LABEL[mediaFilter]}
@@ -515,7 +532,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
         {/* Overlay show/hide toggle, in the same spot on the other views.
             Controls whether the fullscreen viewer keeps its chrome hidden while
             browsing. */}
-        {section && section !== 'timeline' && (
+        {section && !hasFilter && (
           <button
             data-focusable
             data-noautofocus
@@ -533,7 +550,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           key={
             (album ? 'album:' + album.id : route) +
             (section ? ':' + sort[section] : '') +
-            (section === 'timeline' ? ':' + mediaFilter : '')
+            (section === 'timeline' || section === 'album' ? ':' + mediaFilter : '')
           }
         >
           {album ? (
@@ -560,13 +577,16 @@ export function Home({ onLogout }: { onLogout: () => void }) {
               <PhotoGrid
                 loadBuckets={loadAlbumBuckets}
                 loadBucket={loadAlbumBucket}
-                onOpen={openAlbumViewer}
+                onOpen={openFilteredAlbumViewer}
                 loadNextUnloaded={loadNextRef}
                 onAssetsChange={handleAssetsChange}
+                keep={keepMedia}
+                emptyLabel={mediaFilter === 'videos' ? 'No videos' : 'No photos'}
               />
             </div>
           ) : route === 'home' ? (
             <HomeFeed
+              keep={keepMedia}
               onOpen={(assets, index) => {
                 loadNextRef.current = null; // a grid's paging hook, stale here
                 openViewer(assets, index);

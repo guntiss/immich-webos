@@ -816,6 +816,10 @@ select {
 .filter-btn {
   right: 80px;
 }
+/* Home has no sort button: the filter takes the corner. */
+.filter-btn.solo {
+  right: 16px;
+}
 /* Faded out while scrolling down; a scroll up brings it back (see Home). */
 .sort-btn.hidden,
 .overlay-btn.hidden,

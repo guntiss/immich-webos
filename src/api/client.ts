@@ -327,6 +327,16 @@ export async function getTimelineStats(): Promise<TimelineStats> {
   return jsonReq<TimelineStats>('/assets/statistics?' + qs({ visibility: 'timeline', isTrashed: 'false' }));
 }
 
+// How many photos (IMAGE) or videos (VIDEO) an album holds; the album view's
+// photos/videos filter scales its placeholders from this.
+export async function getAlbumKindCount(albumId: string, type: 'IMAGE' | 'VIDEO'): Promise<number> {
+  const r = await jsonReq<{ total: number }>('/search/statistics', {
+    method: 'POST',
+    body: JSON.stringify({ albumIds: [albumId], type }),
+  });
+  return r.total;
+}
+
 export async function getFavoriteBuckets(order: Order = 'desc'): Promise<TimeBucket[]> {
   const q = qs({ isTrashed: 'false', isFavorite: 'true', order });
   return jsonReq<TimeBucket[]>('/timeline/buckets?' + q);
