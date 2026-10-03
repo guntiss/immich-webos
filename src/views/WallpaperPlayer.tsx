@@ -50,6 +50,12 @@ interface Props {
   // offer the Shuffle button: the Slideshow page and albums do, the all-photos
   // views don't
   canShuffle?: boolean;
+  // The viewer's list is only the loaded part of a bigger source whose
+  // onNearEnd feeds random picks from all of it while shuffling: turning
+  // shuffle on then drops the loaded part from the order (it would play first,
+  // and it is the newest part) and starts from the shown photo plus whatever
+  // onNearEnd brings.
+  sampled?: boolean;
   // what this source has already shown: shuffle skips these
   seen: SeenStore;
   // viewer opened from a grid: a photo's place in all of it, for the "12 / 340"
@@ -225,6 +231,7 @@ export function WallpaperPlayer({
   onNearEnd,
   onShuffleChange,
   canShuffle = true,
+  sampled = false,
   seen,
   placeOf,
   from,
@@ -900,7 +907,7 @@ export function WallpaperPlayer({
     let ids = assetsProp.map((_, k) => k);
     let at = 0;
     if (next) {
-      ids = ids.filter((k) => k !== cur && !seen.has(assetsProp[k].id));
+      ids = sampled ? [] : ids.filter((k) => k !== cur && !seen.has(assetsProp[k].id));
       weightedShuffle(ids, (k) => (assetsProp[k]?.isFavorite ? FAV_WEIGHT : 1));
       if (cur !== undefined) ids.unshift(cur);
     } else if (cur !== undefined) {
@@ -916,7 +923,7 @@ export function WallpaperPlayer({
     setI(at);
     setEpoch((n) => n + 1);
     onShuffleChange?.(next); // widen the bound: feed randomizes remaining buckets
-  }, [assetsProp, clearCache, onShuffleChange, seen]);
+  }, [assetsProp, clearCache, onShuffleChange, sampled, seen]);
 
   // An index is navigable only once its media is loaded: a still's blob is ready,
   // or a video has its metadata (or failed, so it can be skipped).
@@ -2543,7 +2550,7 @@ function containRect(img: Still): Record<string, string> {
 // earlier / appear more (the same weighted-sampling trick Apple/Google Photos use
 // to favor "good" shots). Weight 1 is the neutral baseline. In-place on `a`.
 const FAV_WEIGHT = 4; // a favorite is ~4x as likely to land early as a plain shot
-function weightedShuffle<T>(a: T[], weight: (item: T) => number): void {
+export function weightedShuffle<T>(a: T[], weight: (item: T) => number): void {
   const key = new Map<T, number>();
   for (const item of a) {
     const w = Math.max(1e-6, weight(item));

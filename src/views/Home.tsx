@@ -9,6 +9,7 @@ import {
   logout,
   Album,
   getTimelineStats,
+  TimeBucket,
   getAlbumKindCount,
 } from '../api/client';
 import { clearSession, getUser } from '../auth/store';
@@ -20,7 +21,7 @@ import {
   getOverlayHidden,
   setOverlayHidden,
 } from '../settings';
-import { Asset } from '../api/assets';
+import { Asset, flattenBucket } from '../api/assets';
 import { clearStoredThumbs } from '../api/thumbStore';
 import { PhotoGrid, PlaceOf } from '../components/PhotoGrid';
 import { Icon } from '../components/Icon';
@@ -30,7 +31,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Albums, AlbumsRestore } from './Albums';
 import { HomeFeed } from './HomeFeed';
 import { Search } from './Search';
-import { WallpaperPlayer } from './WallpaperPlayer';
+import { WallpaperPlayer, weightedShuffle } from './WallpaperPlayer';
 import { Wallpaper } from './Wallpaper';
 import { memorySeen, SeenStore } from './wallpaperSeen';
 import { useRemote } from '../nav/useRemote';
@@ -50,6 +51,11 @@ const MEDIA_LABEL: Record<MediaFilter, string> = {
   videos: 'Showing videos only',
 };
 
+// Shuffle in an album's viewer deals SAMPLE_EACH photos from each of SAMPLE_BUCKETS
+// random buckets per round: a few photos from many dates, not one date at a time.
+const SAMPLE_BUCKETS = 6;
+const SAMPLE_EACH = 8;
+
 interface Viewer {
   assets: Asset[];
   index: number;
@@ -68,6 +74,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const [route, setRoute] = useState<Route>('home');
   const [album, setAlbum] = useState<Album | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
+  const viewerRef = useRef(viewer);
+  viewerRef.current = viewer;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [confirmLogout, setConfirmLogout] = useState(false);
   // true while the wallpaper slideshow overlay owns the keys (like `viewer`)
@@ -246,6 +254,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   }, []);
   const openAlbumViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
     const from = originOf(assets[index]?.id);
+    sampler.current = null;
     setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf, from });
   }, []);
 
@@ -253,14 +262,10 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const handleAssetsChange = useCallback((assets: Asset[]) => {
     setViewer((v) => {
       if (!v) return null;
+      if (sampler.current) return v; // the sampler feeds the list
       const next = extendList(v.assets, assets);
       return next === v.assets ? v : { ...v, assets: next };
     });
-  }, []);
-
-  // called by the viewer when near the end; delegates to the mounted grid
-  const handleNearEnd = useCallback(() => {
-    loadNextRef.current?.();
   }, []);
 
   // Stable per-view loaders. Inline lambdas here changed identity on every Home
@@ -334,6 +339,88 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   }, [albumId, sort.album, mediaFilter]);
   const loadAlbumBucket = useCallback((tb: string) => getAlbumBucket(albumId!, tb, sort.album), [albumId, sort.album]);
 
+  // Shuffle in an album's viewer. The viewer only holds what the grid has
+  // loaded, newest buckets first, so shuffling that (and paging in the next
+  // bucket in timeline order) clusters around the newest photos. While
+  // shuffling, the viewer is instead fed rounds of a few photos from several
+  // buckets picked at random across the whole album (a bucket's odds follow
+  // its size), fetched here, outside the grid.
+  const sampler = useRef<{
+    buckets: TimeBucket[];
+    left: Map<string, Asset[]>; // each fetched bucket's photos still to deal, shuffled
+    busy: boolean;
+    seen: SeenStore;
+  } | null>(null);
+  const albumLoaders = useRef({ loadAlbumBuckets, loadAlbumBucket, keepMedia });
+  albumLoaders.current = { loadAlbumBuckets, loadAlbumBucket, keepMedia };
+  const sampleRound = useCallback(async () => {
+    const s = sampler.current;
+    if (!s || s.busy || !s.buckets.length) return;
+    s.busy = true;
+    try {
+      for (let attempt = 0; attempt < 12 && sampler.current === s; attempt++) {
+        const live = s.buckets.filter((b) => (s.left.get(b.timeBucket)?.length ?? 1) > 0);
+        if (!live.length) {
+          // all dealt: start another pass
+          s.left.clear();
+          s.seen.clear();
+          continue;
+        }
+        weightedShuffle(live, (b) => s.left.get(b.timeBucket)?.length ?? b.count);
+        const pick = live.slice(0, SAMPLE_BUCKETS);
+        const { loadAlbumBucket: load, keepMedia: keep } = albumLoaders.current;
+        await Promise.all(
+          pick
+            .filter((b) => !s.left.has(b.timeBucket))
+            .map(async (b) => {
+              const assets = flattenBucket(await load(b.timeBucket).catch(() => null)).filter((a) => !keep || keep(a));
+              weightedShuffle(assets, () => 1);
+              s.left.set(b.timeBucket, assets);
+            }),
+        );
+        const batch: Asset[] = [];
+        for (const b of pick) {
+          const dealt = (s.left.get(b.timeBucket) || []).splice(0, SAMPLE_EACH);
+          for (const a of dealt) if (!s.seen.has(a.id)) batch.push(a);
+        }
+        if (sampler.current !== s) return;
+        if (batch.length) {
+          weightedShuffle(batch, () => 1);
+          setViewer((v) => (v && v.seen === s.seen ? { ...v, assets: v.assets.concat(batch) } : v));
+          return;
+        }
+      }
+    } finally {
+      s.busy = false;
+    }
+  }, []);
+  const onViewerShuffle = useCallback(
+    (on: boolean) => {
+      sampler.current = null;
+      if (!on) return;
+      const seen = viewerRef.current?.seen;
+      if (!seen) return;
+      const s = { buckets: [] as TimeBucket[], left: new Map<string, Asset[]>(), busy: false, seen };
+      sampler.current = s;
+      albumLoaders.current
+        .loadAlbumBuckets()
+        .then((bs) => {
+          if (sampler.current !== s) return;
+          s.buckets = bs;
+          void sampleRound();
+        })
+        .catch(() => {});
+    },
+    [sampleRound],
+  );
+
+  // called by the viewer when near the end: more random picks while an album
+  // shuffles, else the mounted grid's next bucket
+  const handleNearEnd = useCallback(() => {
+    if (sampler.current) void sampleRound();
+    else loadNextRef.current?.();
+  }, [sampleRound]);
+
   // Close the viewer and return focus to the thumbnail of the photo last shown
   // (the user may have paged left/right inside the viewer). The grid was never
   // unmounted, so its scroll position and loaded buckets are intact and the
@@ -344,6 +431,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const closeViewer = useCallback(
     (shown: Asset | null) => {
       const id = shown?.id;
+      sampler.current = null;
       setViewer(null);
       setTimeout(() => {
         const el = id
@@ -461,6 +549,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           startIndex={viewer.index}
           seen={viewer.seen}
           canShuffle={viewer.canShuffle}
+          sampled={viewer.canShuffle}
+          onShuffleChange={onViewerShuffle}
           placeOf={viewer.placeOf}
           from={viewer.from}
           locate={locateCell}
