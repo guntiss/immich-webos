@@ -12,67 +12,59 @@
 // Every registered client must answer within a few seconds. A client that
 // doesn't makes tvpowerd file a fault, and after any fault the TV's next power
 // off skips Always Ready and powers down fully, so the TV cold boots next time.
-// That's why we answer every request and drop the registration while the page
-// is hidden (a backgrounded page can be suspended and couldn't answer).
+//
+// A registration can't be undone: cancelling the subscription leaves the client
+// in tvpower's list until the app process exits (checked with getClientList),
+// and registering again under the same name fails with "already registered",
+// leaving the old, now unanswered, subscription in charge, so the saver started
+// mid-show after the viewer was closed and reopened. So the page registers once,
+// keeps that subscription for good, and answers every request: ack:false while
+// something wants the screen awake, ack:true (let it start) otherwise.
 
 interface PalmBridge {
   onservicecallback: ((body: string) => void) | null;
   call(uri: string, params: string): void;
-  cancel?(): void;
 }
 
 const REGISTER = 'luna://com.webos.service.tvpower/power/registerScreenSaverRequest';
 const RESPOND = 'luna://com.webos.service.tvpower/power/responseScreenSaverRequest';
 const CLIENT = 'immich-webos-wallpaper';
 
+let sub: PalmBridge | null = null; // the one subscription, for the page's lifetime
+let holds = 0; // keepAwake() callers that haven't released yet
+const replies = new Set<PalmBridge>(); // kept referenced until each reply is sent
+
+function register(Ctor: new () => PalmBridge): void {
+  if (sub) return;
+  const s = new Ctor();
+  s.onservicecallback = (body: string) => {
+    try {
+      const msg = JSON.parse(body);
+      if (msg.returnValue === false || !msg.timestamp) return;
+      // ack:false = "don't let the saver start"; echo back the timestamp we got
+      const r = new Ctor();
+      replies.add(r);
+      r.onservicecallback = () => replies.delete(r);
+      r.call(RESPOND, JSON.stringify({ clientName: CLIENT, ack: holds === 0, timestamp: msg.timestamp }));
+    } catch {
+      // ignore malformed callbacks
+    }
+  };
+  s.call(REGISTER, JSON.stringify({ subscribe: true, clientName: CLIENT }));
+  sub = s;
+}
+
 // Start holding the screen awake. Returns a stop() that releases it (letting
 // the TV's normal screen saver resume).
 export function keepAwake(): () => void {
   const Ctor = (window as any).PalmServiceBridge;
   if (!Ctor) return () => {}; // not on webOS
-
-  let sub: PalmBridge | null = null;
-  let resp: PalmBridge | null = null; // kept referenced until the reply is sent
-
-  const register = () => {
-    if (sub) return;
-    const s: PalmBridge = new Ctor();
-    s.onservicecallback = (body: string) => {
-      try {
-        const msg = JSON.parse(body);
-        if (msg.returnValue === false || !msg.timestamp) return;
-        // ack:false = "don't let the saver start"; echo back the timestamp we got
-        const r: PalmBridge = new Ctor();
-        r.onservicecallback = () => {
-          if (resp === r) resp = null;
-        };
-        resp = r;
-        r.call(RESPOND, JSON.stringify({ clientName: CLIENT, ack: false, timestamp: msg.timestamp }));
-      } catch {
-        // ignore malformed callbacks
-      }
-    };
-    s.call(REGISTER, JSON.stringify({ subscribe: true, clientName: CLIENT }));
-    sub = s;
-  };
-
-  const unregister = () => {
-    if (!sub) return;
-    try {
-      sub.cancel?.();
-    } catch {
-      // ignore
-    }
-    sub.onservicecallback = null;
-    sub = null;
-  };
-
-  const onVisibility = () => (document.hidden ? unregister() : register());
-  document.addEventListener('visibilitychange', onVisibility);
-  onVisibility();
-
+  register(Ctor);
+  holds++;
+  let released = false;
   return () => {
-    document.removeEventListener('visibilitychange', onVisibility);
-    unregister();
+    if (released) return;
+    released = true;
+    holds--;
   };
 }
