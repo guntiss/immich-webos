@@ -1,16 +1,19 @@
-// App-wide background music: one <audio> element playing internet radio (see
-// radio.ts). It starts on Lofi every time the app opens and is steered from
-// the sidebar's Music menu.
+// App-wide background music: internet radio (see radio.ts). It starts on Lofi
+// every time the app opens and is steered from the sidebar's Music menu.
 //
-// webOS plays one media element at a time: a playing video pauses the radio,
-// and the radio resuming stops the video (even a muted one, even with the radio
-// muted). So a video first ducks the music with duckMusic(): it fades out and
-// pauses with its stream still buffered, then resumes from that buffer and
-// fades back in when the video stops, instead of reconnecting. The stream is
-// let go while the app is in the background, so it never plays over live TV
-// or another app.
+// It plays through Web Audio (streamPlayer.ts), so a video plays over it: a
+// video ducks it with duckMusic() to a lower volume, and it comes back up when
+// the video stops. A station Web Audio can't play (no CORS, an unknown format)
+// goes on an <audio> element instead, and there it can't share: webOS plays
+// one media element at a time, a playing video pauses the radio, and the radio
+// resuming stops the video (even a muted one, even with the radio muted). So
+// on the element the duck fades it out and pauses it with its stream still
+// buffered, then resumes from that buffer and fades back in when the video
+// stops, instead of reconnecting. The stream is let go while the app is in the
+// background, so it never plays over live TV or another app.
 import { useEffect, useState } from 'preact/hooks';
 import { fetchStations, Station } from './radio';
+import { canStream, playStream, StreamPlayer } from './streamPlayer';
 import { digitalSoundOutput, watchSoundOutput } from './soundOutput';
 
 export const GENRES = [
@@ -21,7 +24,8 @@ export const GENRES = [
 ];
 const DEFAULT_GENRE = 'lofi';
 const VOLUME = 0.5; // background level, under the TV's own volume
-const DUCK_MS = 350; // fade out before a video starts
+const DUCKED_VOLUME = 0.15; // under a video's own sound (Web Audio only)
+const DUCK_MS = 350; // fade out (or down) before a video starts
 const UNDUCK_MS = 1000; // fade back in once it stops
 const UNDUCK_DELAY_MS = 300; // so stepping from one video to the next doesn't bounce it
 
@@ -45,6 +49,9 @@ let state: MusicState = {
 const listeners = new Set<() => void>();
 let audio: HTMLAudioElement | null = null;
 let src = ''; // the stream URL set on `audio` ('' = unloaded)
+let web: StreamPlayer | null = null; // the stream playing through Web Audio
+let webUrl = '';
+const noWeb = new Set<string>(); // stations Web Audio couldn't play: on `audio` instead
 let ducks = 0;
 let silent: Promise<void> = Promise.resolve(); // resolves once a duck has faded out
 let unduckTimer = 0;
@@ -81,14 +88,52 @@ function fadeTo(to: number, ms: number, done?: () => void): void {
   }, 30);
 }
 
-// Drive the <audio> element from the state.
+function stopWeb(): void {
+  web?.stop();
+  web = null;
+  webUrl = '';
+}
+
+function startWeb(url: string): void {
+  stopWeb();
+  let played = false;
+  const p = playStream(url, {
+    volume: ducks ? DUCKED_VOLUME : VOLUME,
+    onPlaying: () => {
+      played = true;
+      errors = 0;
+    },
+    // A stream that played and then dropped is tuned in again; one that never
+    // played goes on the <audio> element, which has its own error handling.
+    onError: () => {
+      if (web !== p) return;
+      web = null;
+      webUrl = '';
+      if (!played) noWeb.add(url);
+      sync();
+    },
+  });
+  web = p;
+  webUrl = url;
+}
+
+// Drive the Web Audio stream or the <audio> element from the state.
 function sync(): void {
   const a = audio;
   if (!a) return;
   const st = state.stations[state.idx];
+  if (wanted() && st && !state.failed && canStream() && !noWeb.has(st.url)) {
+    if (src) unload(a);
+    if (webUrl !== st.url) startWeb(st.url);
+    return;
+  }
+  stopWeb();
   if (wanted() && st && !state.failed) {
     if (src !== st.url) a.src = src = st.url;
-    if (ducks) return; // stays paused under the video
+    if (ducks) {
+      a.volume = 0; // stays paused under the video, and fades in after it
+      return;
+    }
     a.play().catch((err: Error) => {
       // blocked by an autoplay policy (desktop dev before any gesture): retry
       // on the next key press or click
@@ -104,13 +149,16 @@ function sync(): void {
       window.addEventListener('pointerdown', retry, true);
     });
   } else if (src) {
-    // unload rather than pause, so a live stream never resumes from a stale
-    // buffer
-    src = '';
-    a.pause();
-    a.removeAttribute('src');
-    a.load();
+    unload(a);
   }
+}
+
+// unload rather than pause, so a live stream never resumes from a stale buffer
+function unload(a: HTMLAudioElement): void {
+  src = '';
+  a.pause();
+  a.removeAttribute('src');
+  a.load();
 }
 
 function ensureAudio(): void {
@@ -189,13 +237,18 @@ export function nextStation(): void {
   set({ idx: (state.idx + 1) % n, failed: false });
 }
 
-// Make way for a video: the music fades out and pauses, and `faded` resolves
-// once it's silent — start the video then. release() fades it back in.
+// Make way for a video, and `faded` resolves once it can start. Through Web
+// Audio the music turns down and plays on under it, so that's at once; on the
+// <audio> element it fades out and pauses, and `faded` waits for the silence.
+// release() brings it back up.
 export function duckMusic(): { faded: Promise<void>; release: () => void } {
   window.clearTimeout(unduckTimer);
   const a = audio;
   if (ducks++ === 0 && a) {
-    if (a.paused) {
+    if (web) {
+      web.setVolume(DUCKED_VOLUME, DUCK_MS);
+      silent = Promise.resolve();
+    } else if (a.paused) {
       // already silent (off, still tuning in, or paused by a video loading):
       // just make sure it comes back with a fade
       window.clearInterval(fadeTimer);
@@ -214,8 +267,9 @@ export function duckMusic(): { faded: Promise<void>; release: () => void } {
     ducked = false;
     if (--ducks) return;
     unduckTimer = window.setTimeout(() => {
-      sync(); // resumes the stream, still at zero volume
-      fadeTo(VOLUME, UNDUCK_MS);
+      sync(); // resumes the element's stream, still at zero volume
+      if (web) web.setVolume(VOLUME, UNDUCK_MS);
+      else fadeTo(VOLUME, UNDUCK_MS);
     }, UNDUCK_DELAY_MS);
   };
   return { faded: silent, release };

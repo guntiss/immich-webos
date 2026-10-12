@@ -416,13 +416,15 @@ export function WallpaperPlayer({
     else vidHoldRef.current = true;
   }, [viewer]);
 
-  // The background music can't play alongside a clip on webOS (see duckMusic),
-  // so each clip ducks it before playing and hands it back once it ends or is
-  // left. Not when it's paused: the music coming back would take the TV's one
-  // player away from the clip and blank its frame. The viewer ducks it even
-  // before LOADING the clip it's moving onto (loadDuck): loading one, an
-  // original especially, can already cut the music off mid-song. Clips readied
-  // ahead as neighbours don't: they load metadata only, which leaves it playing.
+  // Each clip ducks the background music before playing and hands it back once
+  // it ends or is left: through Web Audio the music plays on, quieter, under
+  // the clip; on the <audio> fallback it can't play alongside a clip on webOS
+  // at all (see duckMusic). Not when it's paused: the music coming back would
+  // take the TV's one player away from the clip and blank its frame. The
+  // viewer ducks it even before LOADING the clip it's moving onto (loadDuck):
+  // loading one, an original especially, can already cut the <audio> music off
+  // mid-song. Clips readied ahead as neighbours don't: they load metadata
+  // only, which leaves it playing.
   const musicDucks = useRef(new Map<HTMLVideoElement, ReturnType<typeof duckMusic>>());
   const unduck = useCallback((el: HTMLVideoElement) => {
     musicDucks.current.get(el)?.release();
