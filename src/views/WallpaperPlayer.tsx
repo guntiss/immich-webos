@@ -66,6 +66,9 @@ interface Props {
   // into view and says where it is, to shrink back into on the way out
   from?: { rect: Box; src: string | null };
   locate?: (id: string) => Box | null;
+  // the slideshow closes the viewer after the last item instead of starting
+  // over (a Home feed row: a short, fixed list)
+  exitAtEnd?: boolean;
 }
 
 // The d-pad drives one group of controls at a time, stepped through with
@@ -236,6 +239,7 @@ export function WallpaperPlayer({
   placeOf,
   from,
   locate,
+  exitAtEnd = false,
 }: Props) {
   const viewer = mode === 'viewer';
   const [i, setI] = useState(() => Math.max(0, Math.min(startIndex, assetsProp.length - 1)));
@@ -963,6 +967,11 @@ export function WallpaperPlayer({
   const [navPending, setNavPending] = useState(false);
   const advance = useCallback(
     (delta: number, manual = false): boolean => {
+      // the show ran past the last item of a list that closes at its end
+      if (exitAtEnd && !manual && !shuffleRef.current && iRef.current + delta >= assets.length) {
+        exitRef.current();
+        return true;
+      }
       const n = targetIndex(delta, manual);
       // nowhere else to go (yet): leave the frame and timers alone; the auto
       // retry loop polls until onNearEnd has appended more
@@ -1000,7 +1009,7 @@ export function WallpaperPlayer({
         });
       return false;
     },
-    [targetIndex, isLoaded, loadInto, dropStale, viewer],
+    [targetIndex, isLoaded, loadInto, dropStale, viewer, exitAtEnd, assets.length],
   );
 
   // Auto-advance: try to step forward; if the next frame isn't loaded yet, keep

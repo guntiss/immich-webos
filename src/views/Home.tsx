@@ -63,6 +63,7 @@ interface Viewer {
   canShuffle: boolean; // opened from an album: offers Shuffle
   placeOf?: PlaceOf; // opened from a grid: numbers photos across all of it
   from?: { rect: DOMRect; src: string | null }; // the cell it grows out of
+  exitAtEnd?: boolean; // opened from a Home feed row: closes after its last item
 }
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
@@ -248,9 +249,9 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     return el.getBoundingClientRect();
   }, []);
 
-  const openViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
+  const openViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf, exitAtEnd?: boolean) => {
     const from = originOf(assets[index]?.id);
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: false, placeOf, from });
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: false, placeOf, from, exitAtEnd });
   }, []);
   const openAlbumViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
     const from = originOf(assets[index]?.id);
@@ -554,6 +555,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           placeOf={viewer.placeOf}
           from={viewer.from}
           locate={locateCell}
+          exitAtEnd={viewer.exitAtEnd}
           onExit={closeViewer}
           onNearEnd={handleNearEnd}
         />
@@ -679,7 +681,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
               keep={keepMedia}
               onOpen={(assets, index) => {
                 loadNextRef.current = null; // a grid's paging hook, stale here
-                openViewer(assets, index);
+                openViewer(assets, index, undefined, true);
               }}
               onOpenAlbum={openAlbumFrom('.feed')}
               restore={albumsRestore.current}
