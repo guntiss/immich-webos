@@ -1410,6 +1410,37 @@ select {
   flex: 0 0 auto;
   width: 320px;
 }
+/* Continue watching: the photo the album was left on, a play badge in the
+   middle and how far into the album it is along the bottom. Overrides the
+   full-bleed .album-cover > * positioning. */
+.feed-scroller .continue-card {
+  width: 440px;
+}
+.album-cover > .continue-play {
+  top: 50%;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  width: 72px;
+  height: 72px;
+  margin: -36px 0 0 -36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+.album-cover > .continue-bar {
+  top: auto;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.25);
+}
+.continue-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--immich-dark-primary);
+}
 
 /* Result header (person/place/text search): back chip + heading */
 .result-head {

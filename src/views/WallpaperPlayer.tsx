@@ -69,6 +69,8 @@ interface Props {
   // the slideshow closes the viewer after the last item instead of starting
   // over (a Home feed row: a short, fixed list)
   exitAtEnd?: boolean;
+  // each item as it comes on screen (an album's viewer saves where it was left)
+  onShown?: (shown: Asset) => void;
 }
 
 // The d-pad drives one group of controls at a time, stepped through with
@@ -240,6 +242,7 @@ export function WallpaperPlayer({
   from,
   locate,
   exitAtEnd = false,
+  onShown,
 }: Props) {
   const viewer = mode === 'viewer';
   const [i, setI] = useState(() => Math.max(0, Math.min(startIndex, assetsProp.length - 1)));
@@ -1192,6 +1195,11 @@ export function WallpaperPlayer({
       seen.add(shown.asset.id); // remembered so shuffle won't repeat it
     }
   }, [layers, showA]);
+  const onShownRef = useRef(onShown);
+  onShownRef.current = onShown;
+  useEffect(() => {
+    if (shownAsset) onShownRef.current?.(shownAsset);
+  }, [shownAsset]);
 
   // Caption for the SHOWN asset, switched the moment its image is revealed.
   // Keying on the shown asset (not the target index) guarantees the caption

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Album } from '../api/client';
 import { Asset } from '../api/assets';
+import { loadThumb } from '../api/media';
+import { AlbumProgress, getAlbumProgress } from '../settings';
+import { Icon } from '../components/Icon';
 import { FeedRow, SLOT_COUNT, cachedSuggestions, loadSuggestions } from '../api/suggestions';
 import { focus } from '../nav/focus';
 import { EmptyState } from '../components/EmptyState';
@@ -51,6 +54,7 @@ function visibleRows(slots: (FeedRow[] | undefined)[], keep?: (a: Asset) => bool
 export function HomeFeed({
   onOpen,
   onOpenAlbum,
+  onResume,
   restore,
   onRestored,
   keep,
@@ -58,11 +62,13 @@ export function HomeFeed({
   keep?: (a: Asset) => boolean;
   onOpen: (assets: Asset[], index: number) => void;
   onOpenAlbum: (album: Album) => void;
+  onResume: (p: AlbumProgress) => void;
   restore?: AlbumsRestore | null;
   onRestored?: () => void;
 }) {
   const [slots, setSlots] = useState<(FeedRow[] | undefined)[]>(() => cachedSuggestions() || []);
   const pageRef = useRef<HTMLDivElement>(null);
+  const [progress] = useState(getAlbumProgress);
   const done = slots.filter(Boolean).length === SLOT_COUNT;
 
   useEffect(() => {
@@ -95,7 +101,7 @@ export function HomeFeed({
     }
   }, [rows, done, restore]);
 
-  if (!rows.length) {
+  if (!rows.length && !progress) {
     return done ? (
       <EmptyState
         title={keep ? 'Nothing of that kind to suggest yet' : 'Nothing to show yet'}
@@ -112,6 +118,16 @@ export function HomeFeed({
 
   return (
     <div class="feed" ref={pageRef}>
+      {progress && (
+        <section class="feed-row" key="continue">
+          <div class="feed-head">
+            <h2 class="feed-title">Continue watching</h2>
+          </div>
+          <div class="feed-scroller">
+            <ContinueCard progress={progress} onSelect={() => onResume(progress)} />
+          </div>
+        </section>
+      )}
       {rows.map((row) => (
         <section class="feed-row" key={row.id}>
           <div class="feed-head">
@@ -140,4 +156,60 @@ export function HomeFeed({
       ))}
     </div>
   );
+}
+
+// The album last watched, on the photo it was left on, with how far into the
+// album that is. Carries the album's id so Back from it refocuses this card.
+function ContinueCard({ progress: p, onSelect }: { progress: AlbumProgress; onSelect: () => void }) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    loadThumb(p.assetId)
+      .then((u) => alive && setSrc(u))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [p.assetId]);
+
+  const place = p.n && p.total ? p.n + ' of ' + p.total : '';
+  return (
+    <button
+      data-focusable
+      data-album-id={p.album.id}
+      data-row="continue"
+      class="album-card continue-card focusable"
+      onClick={onSelect}
+    >
+      <div class="album-cover">
+        {src ? <img class="album-cover-img" src={src} /> : <div class="thumb-ph" />}
+        <span class="continue-play">
+          <Icon name="play" size={40} />
+        </span>
+        {place && (
+          <span class="continue-bar">
+            <span style={{ width: (100 * p.n!) / p.total! + '%' }} />
+          </span>
+        )}
+      </div>
+      <div class="album-meta">
+        <div class="album-name">{p.album.albumName}</div>
+        <div class="album-count">{[place, leftWhen(p.at)].filter(Boolean).join(' · ')}</div>
+      </div>
+    </button>
+  );
+}
+
+// "today", "yesterday", "3 days ago", then the date.
+function leftWhen(at: number): string {
+  const day = (t: number) => {
+    const d = new Date(t);
+    return Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+  };
+  const n = day(Date.now()) - day(at);
+  if (n <= 0) return 'today';
+  if (n === 1) return 'yesterday';
+  if (n < 7) return n + ' days ago';
+  return new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }

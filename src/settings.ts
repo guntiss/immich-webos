@@ -1,6 +1,8 @@
 // Small persisted UI preferences. webOS web apps have a normal localStorage
 // that survives app restarts (same store the auth state uses).
 
+import type { Album } from './api/client';
+
 const LIVE_PLAY_KEY = 'immich.livePlay';
 const VIDEO_QUALITY_KEY = 'immich.videoQuality';
 const SORT_KEY = 'immich.sort.';
@@ -59,6 +61,39 @@ export function getSort(section: SortSection): SortDir {
 export function setSort(section: SortSection, dir: SortDir): void {
   if (dir === 'asc') localStorage.setItem(SORT_KEY + section, 'asc');
   else localStorage.removeItem(SORT_KEY + section);
+}
+
+// The photos/videos filter on Home, Photos and inside an album: both kinds (the
+// default each time the app opens), or only one.
+export type MediaFilter = 'all' | 'photos' | 'videos';
+
+// Where the last album's viewer was left: the album and the photo on screen,
+// so Home can offer to continue from there. Saved as each photo shows, so it
+// survives the app (or the TV) closing mid-show. One album only: the latest.
+const ALBUM_PROGRESS_KEY = 'immich.albumProgress';
+
+export interface AlbumProgress {
+  album: Album;
+  assetId: string;
+  createdAt: string; // the photo's date: finds its month in the album on resume
+  filter: MediaFilter; // the album's filter while it was watched
+  n?: number; // its place in the album ("12 of 340"), when known
+  total?: number;
+  at: number; // when it was on screen (ms)
+}
+
+export function getAlbumProgress(): AlbumProgress | null {
+  try {
+    const p = JSON.parse(localStorage.getItem(ALBUM_PROGRESS_KEY) || 'null');
+    return p && p.album?.id && typeof p.assetId === 'string' ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setAlbumProgress(p: AlbumProgress | null): void {
+  if (p) localStorage.setItem(ALBUM_PROGRESS_KEY, JSON.stringify(p));
+  else localStorage.removeItem(ALBUM_PROGRESS_KEY);
 }
 
 // Albums the wallpaper slideshow draws from, by id. Empty until the user picks

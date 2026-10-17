@@ -8,6 +8,7 @@ import { justify, targetRowHeight, GRID_GAP as GAP } from './justified';
 import { reportError } from './ErrorBoundary';
 import { EmptyState } from './EmptyState';
 import { TimelineScrubber } from './TimelineScrubber';
+import { focus } from '../nav/focus';
 
 const DAY_SEP = 5; // px gap inserted between day-groups on a shared row
 const LABEL_GAP = 24; // min px between one day label's end and the next one's start
@@ -31,6 +32,10 @@ interface Props {
   // only the assets this keeps (the Photos view's photos/videos filter); the
   // grid shows emptyLabel once every bucket has loaded with none kept
   keep?: (a: Asset) => boolean;
+  // open the viewer on this photo as soon as it loads (Home's "Continue
+  // watching"); onOpenedAt says whether it was found
+  openAt?: { assetId: string; createdAt: string } | null;
+  onOpenedAt?: (found: boolean) => void;
 }
 
 // Date-bucketed, justified-row photo grid (Immich timeline look). Buckets load
@@ -46,7 +51,18 @@ interface Props {
 // reconcile this whole grid. All props are stable (Home useCallback's the
 // loaders; literals for the rest), so a re-render with the same view is a
 // no-op here instead of an 800ms+ diff of every thumbnail vnode.
-export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOpen, loadNextUnloaded, onAssetsChange, emptyLabel, emptyHint, keep }: Props) {
+export const PhotoGrid = memo(function PhotoGrid({
+  loadBuckets,
+  loadBucket,
+  onOpen,
+  loadNextUnloaded,
+  onAssetsChange,
+  emptyLabel,
+  emptyHint,
+  keep,
+  openAt,
+  onOpenedAt,
+}: Props) {
   const [buckets, setBuckets] = useState<TimeBucket[]>([]);
   const [fetched, setFetched] = useState(false); // bucket list resolved (may be empty)
   const [loaded, setLoaded] = useState<Record<string, Asset[]>>({});
@@ -64,18 +80,27 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
   onOpenRef.current = onOpen;
   const onAssetsChangeRef = useRef(onAssetsChange);
   onAssetsChangeRef.current = onAssetsChange;
+  const onOpenedAtRef = useRef(onOpenedAt);
+  onOpenedAtRef.current = onOpenedAt;
   const flatRef = useRef<Asset[]>([]);
   const offsetRef = useRef<Record<string, number>>({});
 
   // keep loadNextUnloaded.current pointed at a fresh closure so callers always
-  // get the next truly-unloaded bucket regardless of when they invoke it
+  // get the next truly-unloaded bucket regardless of when they invoke it. The
+  // viewer's list ends at the last loaded bucket, so it's the first one after
+  // that (a jump down the grid leaves unloaded buckets above, which the viewer
+  // can't use), else the first one anywhere.
   const bucketsRef = useRef(buckets);
   bucketsRef.current = buckets;
   if (loadNextUnloaded) {
     loadNextUnloaded.current = () => {
-      const next = bucketsRef.current.find(
-        (b) => !loadedRef.current[b.timeBucket] && !loadingRef.current.has(b.timeBucket),
-      );
+      const bs = bucketsRef.current;
+      const free = (b: TimeBucket) => !loadedRef.current[b.timeBucket] && !loadingRef.current.has(b.timeBucket);
+      let last = -1;
+      bs.forEach((b, k) => {
+        if (loadedRef.current[b.timeBucket]) last = k;
+      });
+      const next = bs.slice(last + 1).find(free) || bs.find(free);
       if (next) ensureBucket(next.timeBucket);
     };
   }
@@ -145,6 +170,37 @@ export const PhotoGrid = memo(function PhotoGrid({ loadBuckets, loadBucket, onOp
     }
     return n ? { n, total } : null;
   }, []);
+
+  // Open on `openAt` (see Props): jump the grid to the photo's month, load
+  // that bucket and its neighbours (a photo just after midnight on the 1st can
+  // sit in either month, depending on the time zone), and open the viewer on
+  // the photo once its cell is in, brought into view first so the viewer grows
+  // out of it.
+  const jumped = useRef<object | null>(null);
+  useEffect(() => {
+    if (!openAt || !buckets.length) return;
+    const near = bucketsNear(buckets, openAt.createdAt);
+    for (const tb of near) {
+      const k = loaded[tb]?.findIndex((a) => a.id === openAt.assetId) ?? -1;
+      if (k < 0) continue;
+      const cell = scrollRef.current?.querySelector<HTMLElement>(`[data-asset-id="${openAt.assetId}"]`);
+      if (cell) focus(cell, true);
+      onOpenedAtRef.current?.(true);
+      onOpenRef.current(flatRef.current, (offsetRef.current[tb] ?? 0) + k, placeOf);
+      return;
+    }
+    if (near.every((tb) => loaded[tb])) {
+      onOpenedAtRef.current?.(false);
+      return;
+    }
+    if (jumped.current !== openAt) {
+      jumped.current = openAt;
+      const grid = scrollRef.current;
+      const section = grid?.querySelector<HTMLElement>(`[data-bucket="${near[0]}"]`);
+      if (grid && section) grid.scrollTop = section.offsetTop;
+    }
+    near.forEach(ensureBucket);
+  }, [openAt, buckets, loaded]);
 
   // Stable: resolves the bucket-local index to a global one against the latest
   // flat list (read from refs) at click time.
@@ -364,6 +420,26 @@ interface DayGroup {
 // preserves each group's offset within the bucket so onOpen still maps to the
 // correct flat index. Local calendar day (not UTC) so headers match the wall
 // date the photo shows.
+// The buckets a photo taken at `iso` can be in: the one for its month (or the
+// closest month there is) first, then the ones either side of it.
+function bucketsNear(buckets: TimeBucket[], iso: string): string[] {
+  const month = (s: string) => {
+    const m = /^(\d{4})-(\d{1,2})/.exec(s);
+    return m ? +m[1] * 12 + +m[2] - 1 : NaN;
+  };
+  const want = month(iso);
+  let best = 0;
+  let bestDist = Infinity;
+  buckets.forEach((b, k) => {
+    const d = Math.abs(month(b.timeBucket) - want);
+    if (d < bestDist) {
+      best = k;
+      bestDist = d;
+    }
+  });
+  return [best, best - 1, best + 1].filter((k) => k >= 0 && k < buckets.length).map((k) => buckets[k].timeBucket);
+}
+
 function groupByDay(assets: Asset[]): DayGroup[] {
   const groups: DayGroup[] = [];
   let cur: DayGroup | null = null;

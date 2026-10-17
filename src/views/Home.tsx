@@ -20,6 +20,9 @@ import {
   SortDir,
   getOverlayHidden,
   setOverlayHidden,
+  MediaFilter,
+  AlbumProgress,
+  setAlbumProgress,
 } from '../settings';
 import { Asset, flattenBucket } from '../api/assets';
 import { clearStoredThumbs } from '../api/thumbStore';
@@ -40,9 +43,7 @@ import { exitApp } from '../nav/exit';
 import { startMusic, stopMusic } from '../api/music';
 import { clearSuggestions } from '../api/suggestions';
 
-// The Photos view's filter: both photos and videos (the default each time the
-// app opens), or only one kind. Cycled by the header button.
-type MediaFilter = 'all' | 'photos' | 'videos';
+// The photos/videos filter, cycled by the header button.
 const MEDIA_NEXT: Record<MediaFilter, MediaFilter> = { all: 'photos', photos: 'videos', videos: 'all' };
 const MEDIA_ICON: Record<MediaFilter, IconName> = { all: 'media', photos: 'image', videos: 'video' };
 const MEDIA_LABEL: Record<MediaFilter, string> = {
@@ -64,7 +65,13 @@ interface Viewer {
   placeOf?: PlaceOf; // opened from a grid: numbers photos across all of it
   from?: { rect: DOMRect; src: string | null }; // the cell it grows out of
   exitAtEnd?: boolean; // opened from a Home feed row: closes after its last item
+  album?: Album; // opened from an album: where it's left is saved, for Continue watching
+  filter?: MediaFilter; // ...under this filter
 }
+
+// How long a "Continue watching" waits for its photo to load before giving up
+// (it stays in the album, opened)
+const RESUME_MS = 20000;
 
 // Main shell: Immich-style auto-hiding left sidebar + content area + fullscreen
 // viewer overlay. Sidebar is collapsed (icon strip) by default; a left-edge
@@ -74,6 +81,17 @@ interface Viewer {
 export function Home({ onLogout }: { onLogout: () => void }) {
   const [route, setRoute] = useState<Route>('home');
   const [album, setAlbum] = useState<Album | null>(null);
+  const albumRef = useRef(album);
+  albumRef.current = album;
+  // "Continue watching": the album's grid opens the viewer on this photo once
+  // it loads (see PhotoGrid's openAt)
+  const [resumeAt, setResumeAt] = useState<AlbumProgress | null>(null);
+  useEffect(() => {
+    if (!resumeAt) return;
+    if (!album) return setResumeAt(null); // left the album before it opened
+    const t = window.setTimeout(() => setResumeAt(null), RESUME_MS);
+    return () => window.clearTimeout(t);
+  }, [resumeAt, album]);
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const viewerRef = useRef(viewer);
   viewerRef.current = viewer;
@@ -227,6 +245,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     // Returning to the albums list or the home page restores its own scroll +
     // focus (see Albums, HomeFeed); don't yank focus to the first card then.
     if (!album && (route === 'albums' || route === 'home') && albumsRestore.current) return;
+    // resuming: the grid focuses the photo it opens on
+    if (album && resumeAt) return;
     setTimeout(() => focusFirstContent(), 0);
   }, [route, album]);
 
@@ -256,8 +276,29 @@ export function Home({ onLogout }: { onLogout: () => void }) {
   const openAlbumViewer = useCallback((assets: Asset[], index: number, placeOf?: PlaceOf) => {
     const from = originOf(assets[index]?.id);
     sampler.current = null;
-    setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf, from });
+    const album = albumRef.current ?? undefined;
+    setViewer({ assets, index, seen: memorySeen(), canShuffle: true, placeOf, from, album, filter: mediaFilterRef.current });
   }, []);
+
+  // An album's viewer saves each photo it shows, for Home's Continue watching.
+  const onViewerShown = useCallback((a: Asset) => {
+    const v = viewerRef.current;
+    if (!v?.album) return;
+    const place = v.placeOf?.(a.id);
+    // only what the card and the album's header use (the server's album carries
+    // its users and more)
+    const { id, albumName, albumThumbnailAssetId, assetCount, shared } = v.album;
+    setAlbumProgress({
+      album: { id, albumName, albumThumbnailAssetId, assetCount, shared },
+      assetId: a.id,
+      createdAt: a.createdAt,
+      filter: v.filter ?? 'all',
+      n: place?.n,
+      total: place?.total,
+      at: Date.now(),
+    });
+  }, []);
+  const onResumeOpened = useCallback(() => setResumeAt(null), []);
 
   // update the live asset list in the viewer as the grid loads more buckets
   const handleAssetsChange = useCallback((assets: Asset[]) => {
@@ -506,6 +547,14 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     setAlbum(a);
   };
 
+  // Continue watching: the album, under the filter it was watched with, with
+  // the viewer opening on the photo it was left on.
+  const resumeAlbum = (p: AlbumProgress) => {
+    setMediaFilter(p.filter);
+    setResumeAt(p);
+    openAlbumFrom('.feed')(p.album);
+  };
+
   const navigate = (r: Route) => {
     albumsRestore.current = null;
     setAlbum(null);
@@ -533,6 +582,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
     await logout();
     await clearStoredThumbs();
     clearSuggestions();
+    setAlbumProgress(null);
     clearSession();
     onLogout();
   };
@@ -558,6 +608,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
           exitAtEnd={viewer.exitAtEnd}
           onExit={closeViewer}
           onNearEnd={handleNearEnd}
+          onShown={viewer.album ? onViewerShown : undefined}
         />
       )}
       {toast && <div class="toast">{toast}</div>}
@@ -674,6 +725,8 @@ export function Home({ onLogout }: { onLogout: () => void }) {
                 onAssetsChange={handleAssetsChange}
                 keep={keepMedia}
                 emptyLabel={mediaFilter === 'videos' ? 'No videos' : 'No photos'}
+                openAt={resumeAt?.album.id === album.id ? resumeAt : null}
+                onOpenedAt={onResumeOpened}
               />
             </div>
           ) : route === 'home' ? (
@@ -684,6 +737,7 @@ export function Home({ onLogout }: { onLogout: () => void }) {
                 openViewer(assets, index, undefined, true);
               }}
               onOpenAlbum={openAlbumFrom('.feed')}
+              onResume={resumeAlbum}
               restore={albumsRestore.current}
               onRestored={() => {
                 albumsRestore.current = null;
